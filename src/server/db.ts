@@ -92,19 +92,12 @@ export function initDb() {
     )
   `);
 
-  // Super Admin inicial
-  const superAdmin = db.prepare("SELECT * FROM users WHERE role = 'SUPER_ADMIN'").get();
-  if (!superAdmin) {
-    db.prepare('INSERT OR IGNORE INTO users (google_id, email, gamertag, role) VALUES (?, ?, ?, ?)')
-      .run('cristhian-admin-id', 'cristhianamador@gmail.com', 'CRISTHIAN_ADMIN#0001', 'SUPER_ADMIN');
-  }
-
   // Competición Default
   const defaultComp = db.prepare("SELECT * FROM competitions WHERE id = 1").get();
   if (!defaultComp) {
     db.prepare(`
       INSERT INTO competitions (id, name, type, status, admin_id) 
-      VALUES (1, 'Liga Beta', 'LIGA', 'ACTIVE', 'cristhian-admin-id')
+      VALUES (1, 'Liga Beta', 'LIGA', 'ACTIVE', NULL)
     `).run();
   }
 

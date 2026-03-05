@@ -48,22 +48,32 @@ async function startServer() {
   app.post("/api/auth/login", (req, res) => {
     const { google_id, email, gamertag, avatar_url } = req.body;
     try {
-      let user = db.prepare('SELECT * FROM users WHERE google_id = ?').get(google_id) as any;
+      // Buscar por google_id O por email (para atrapar la semilla del admin)
+      let user = db.prepare('SELECT * FROM users WHERE google_id = ? OR email = ?').get(google_id, email) as any;
+
       if (!user) {
-        // Si es tu propio email, forzar Super Admin
+        // Registro nuevo
         const role = email === 'cristhianamador@gmail.com' ? 'SUPER_ADMIN' : 'PLAYER';
         db.prepare('INSERT INTO users (google_id, email, gamertag, role, avatar_url) VALUES (?, ?, ?, ?, ?)')
           .run(google_id, email, gamertag, role, avatar_url);
         user = db.prepare('SELECT * FROM users WHERE google_id = ?').get(google_id);
       } else {
-        // Si el usuario existe pero es cristhian, asegurar que tenga el rol (por si acaso)
+        // Si la cuenta existe, pero el google_id es distinto (como el dummy "cristhian-admin-id"), lo actualizamos
+        if (user.google_id !== google_id) {
+          db.prepare('UPDATE users SET google_id = ?, avatar_url = COALESCE(avatar_url, ?) WHERE email = ?').run(google_id, avatar_url, email);
+          user.google_id = google_id;
+          user.avatar_url = user.avatar_url || avatar_url; // Actualizar temp state
+        }
+
+        // Forzar rol de SUPER_ADMIN si es su correo
         if (email === 'cristhianamador@gmail.com' && user.role !== 'SUPER_ADMIN') {
-          db.prepare("UPDATE users SET role = 'SUPER_ADMIN' WHERE google_id = ?").run(google_id);
+          db.prepare("UPDATE users SET role = 'SUPER_ADMIN' WHERE email = ?").run(email);
           user.role = 'SUPER_ADMIN';
         }
-        // Actualizar su foto de perfil si no entra en conflicto con una custom
+
+        // Actualizar foto si venía vacío
         if (avatar_url && !user.avatar_url) {
-          db.prepare('UPDATE users SET avatar_url = ? WHERE google_id = ?').run(avatar_url, google_id);
+          db.prepare('UPDATE users SET avatar_url = ? WHERE email = ?').run(avatar_url, email);
           user.avatar_url = avatar_url;
         }
       }
