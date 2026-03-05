@@ -1,0 +1,5 @@
+{
+  "name": "AXION",
+  "description": "Plataforma de eSports y torneos de Warzone con IA para extracción de stats.",
+  "requestFramePermissions": []
+}
