@@ -1,26 +1,43 @@
 import { Trophy, Medal, User, ArrowDown, ArrowUp } from 'lucide-react';
 import { motion } from 'motion/react';
-import { useState } from 'react';
-
-// Datos de prueba (Mock Data) para mostrar el diseño
-const mockPlayers = [
-  { rank: 1, gamertag: 'ElMataNoobs', squad: 'Los Malandros', points: 600, kills: 40, kd: 4.1, matches: 5 },
-  { rank: 2, gamertag: 'AlphaOne', squad: 'Team Alpha', points: 450, kills: 30, kd: 3.0, matches: 5 },
-  { rank: 3, gamertag: 'SniperPro', squad: 'Los Malandros', points: 400, kills: 25, kd: 2.8, matches: 5 },
-  { rank: 4, gamertag: 'GhostLead', squad: 'Ghost Squad', points: 400, kills: 25, kd: 2.5, matches: 5 },
-  { rank: 5, gamertag: 'BravoTwo', squad: 'Team Alpha', points: 350, kills: 22, kd: 2.6, matches: 5 },
-  { rank: 6, gamertag: 'CharlieThree', squad: 'Team Alpha', points: 300, kills: 20, kd: 2.7, matches: 5 },
-  { rank: 7, gamertag: 'Spectre', squad: 'Ghost Squad', points: 300, kills: 20, kd: 2.0, matches: 5 },
-  { rank: 8, gamertag: 'RushB', squad: 'Los Malandros', points: 250, kills: 20, kd: 2.5, matches: 5 },
-  { rank: 9, gamertag: 'Phantom', squad: 'Ghost Squad', points: 250, kills: 15, kd: 1.8, matches: 5 },
-  { rank: 10, gamertag: 'Camper1', squad: 'Noobs Unidos', points: 200, kills: 10, kd: 0.9, matches: 5 },
-];
+import { useEffect, useState } from 'react';
 
 type SortField = 'points' | 'kills' | 'kd';
 
 export default function Individual() {
+  const [players, setPlayers] = useState<any[]>([]);
   const [sortField, setSortField] = useState<SortField>('points');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchIndividual = async () => {
+      try {
+        const res = await fetch('/api/leaderboard/individual');
+        const data = await res.json();
+        const normalized = (data || []).map((row: any) => {
+          const kills = Number(row.kills || 0);
+          const points = Number(row.points || 0);
+          const matches = Number(row.matches || 0);
+          return {
+            gamertag: row.gamertag,
+            squad: row.squad || 'Sin Squad',
+            kills,
+            points,
+            matches,
+            kd: matches > 0 ? Number((kills / matches).toFixed(2)) : 0,
+          };
+        });
+        setPlayers(normalized);
+      } catch (e) {
+        console.error('Failed to fetch individual leaderboard', e);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchIndividual();
+  }, []);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -31,7 +48,7 @@ export default function Individual() {
     }
   };
 
-  const sortedPlayers = [...mockPlayers].sort((a, b) => {
+  const sortedPlayers = [...players].sort((a, b) => {
     const multiplier = sortDirection === 'asc' ? 1 : -1;
     return (a[sortField] - b[sortField]) * multiplier;
   });
@@ -66,6 +83,9 @@ export default function Individual() {
 
       <div className="bg-[#0F1115] rounded-2xl border border-white/5 overflow-hidden shadow-lg">
         <div className="overflow-x-auto">
+          {isLoading ? (
+            <div className="p-8 text-center text-slate-500 text-sm">Cargando ranking individual...</div>
+          ) : (
           <table className="w-full text-sm text-left">
             <thead className="text-xs text-slate-500 uppercase bg-black/20 border-b border-white/5">
               <tr>
@@ -123,8 +143,14 @@ export default function Individual() {
                   </td>
                 </tr>
               ))}
+              {sortedPlayers.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-4 py-6 text-center text-slate-500">Sin datos aún.</td>
+                </tr>
+              )}
             </tbody>
           </table>
+          )}
         </div>
       </div>
     </motion.div>

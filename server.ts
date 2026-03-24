@@ -18,6 +18,21 @@ async function startServer() {
 
   const makeInviteCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
 
+  const parseRules = (rules: any) => {
+    if (!rules) return {} as any;
+    if (typeof rules === 'object') return rules;
+    try {
+      return JSON.parse(rules);
+    } catch {
+      return {} as any;
+    }
+  };
+
+  const normalizeLeagueMode = (value: any): 'RANDOM' | 'FIXED_SQUAD' => {
+    const raw = String(value || '').toUpperCase();
+    return raw === 'FIXED_SQUAD' ? 'FIXED_SQUAD' : 'RANDOM';
+  };
+
   const getProgressStats = (userId: string, whereSql = "", params: any[] = []) => {
     return db.prepare(`
       SELECT
@@ -198,21 +213,28 @@ async function startServer() {
 
   // API: Crear Liga
   app.post("/api/leagues", (req, res) => {
-    const { name, admin_id, rules, start_date, end_date, invite_code } = req.body;
+    const { name, admin_id, rules, start_date, end_date, invite_code, league_mode } = req.body;
     if (!name) return res.status(400).json({ error: "League name is required" });
 
     try {
+      const mode = normalizeLeagueMode(league_mode || parseRules(rules)?.league_mode);
+      const normalizedRules = {
+        ...parseRules(rules),
+        league_mode: mode,
+      };
+
       const code = (invite_code || makeInviteCode()).toUpperCase();
       const result = db.prepare(`
         INSERT INTO competitions (name, type, status, admin_id, invite_code, rules, start_date, end_date, counts_for_league)
         VALUES (?, 'LIGA', 'OPEN', ?, ?, ?, ?, ?, 1)
-      `).run(name, admin_id || null, code, rules || null, start_date || null, end_date || null);
+      `).run(name, admin_id || null, code, JSON.stringify(normalizedRules), start_date || null, end_date || null);
 
       res.json({
         id: result.lastInsertRowid,
         name,
         type: 'LIGA',
         invite_code: code,
+        league_mode: mode,
       });
     } catch (e) {
       console.error('Error creating league:', e);
@@ -224,12 +246,18 @@ async function startServer() {
   app.get("/api/leagues", (req, res) => {
     try {
       const rows = db.prepare(`
-        SELECT id, name, status, invite_code, admin_id, start_date, end_date
+        SELECT id, name, status, invite_code, admin_id, rules, start_date, end_date
         FROM competitions
         WHERE type = 'LIGA'
         ORDER BY id DESC
       `).all();
-      res.json(rows);
+      res.json((rows as any[]).map((row) => {
+        const parsed = parseRules((row as any).rules);
+        return {
+          ...(row as any),
+          league_mode: normalizeLeagueMode(parsed?.league_mode),
+        };
+      }));
     } catch (e) {
       res.status(500).json({ error: "Failed to list leagues" });
     }
@@ -256,9 +284,17 @@ async function startServer() {
     const counts = counts_for_league ? 1 : 0;
 
     try {
+      let inheritedRules = parseRules(rules);
       if (leagueId) {
-        const league = db.prepare("SELECT id FROM competitions WHERE id = ? AND type = 'LIGA'").get(leagueId);
+        const league = db.prepare("SELECT id, rules FROM competitions WHERE id = ? AND type = 'LIGA'").get(leagueId) as any;
         if (!league) return res.status(404).json({ error: "Parent league not found" });
+
+        const leagueRules = parseRules(league.rules);
+        inheritedRules = {
+          ...leagueRules,
+          ...inheritedRules,
+          league_mode: normalizeLeagueMode(inheritedRules?.league_mode || leagueRules?.league_mode),
+        };
       }
 
       const code = (invite_code || makeInviteCode()).toUpperCase();
@@ -273,7 +309,7 @@ async function startServer() {
         code,
         leagueId,
         normalizedType === 'TORNEO' ? counts : 1,
-        rules || null,
+        Object.keys(inheritedRules).length > 0 ? JSON.stringify(inheritedRules) : null,
         start_date || null,
         end_date || null
       );
@@ -373,6 +409,96 @@ async function startServer() {
     if (![2, 3, 4].includes(squadSize)) return res.status(400).json({ error: "squad_size must be 2, 3, or 4" });
 
     try {
+      const competition = db.prepare(`
+        SELECT id, type, parent_league_id
+        FROM competitions
+        WHERE id = ?
+      `).get(competitionId) as any;
+
+      if (!competition) return res.status(404).json({ error: "Competition not found" });
+
+      let leagueMode: 'RANDOM' | 'FIXED_SQUAD' = 'RANDOM';
+      if (competition.parent_league_id) {
+        const league = db.prepare(`
+          SELECT rules
+          FROM competitions
+          WHERE id = ? AND type = 'LIGA'
+        `).get(competition.parent_league_id) as any;
+        const leagueRules = parseRules(league?.rules);
+        leagueMode = normalizeLeagueMode(leagueRules?.league_mode);
+      }
+
+      if (leagueMode === 'FIXED_SQUAD' && competition.parent_league_id) {
+        const previousTournament = db.prepare(`
+          SELECT c.id
+          FROM competitions c
+          WHERE c.type = 'TORNEO'
+            AND c.parent_league_id = ?
+            AND c.id <> ?
+            AND EXISTS (
+              SELECT 1 FROM squads s
+              JOIN squad_members sm ON sm.squad_id = s.id AND sm.status = 'ACTIVE'
+              WHERE s.competition_id = c.id
+            )
+          ORDER BY c.id DESC
+          LIMIT 1
+        `).get(competition.parent_league_id, competitionId) as any;
+
+        if (previousTournament?.id) {
+          const cloneResult = db.transaction(() => {
+            const sourceSquads = db.prepare(`
+              SELECT id, name, max_members
+              FROM squads
+              WHERE competition_id = ?
+              ORDER BY id ASC
+            `).all(previousTournament.id) as any[];
+
+            let squadsCreated = 0;
+            let playersAssigned = 0;
+
+            for (const source of sourceSquads) {
+              const sourceMembers = db.prepare(`
+                SELECT sm.user_id
+                FROM squad_members sm
+                WHERE sm.squad_id = ? AND sm.status = 'ACTIVE'
+                ORDER BY sm.joined_at ASC
+              `).all(source.id) as Array<{ user_id: string }>;
+
+              if (sourceMembers.length === 0) continue;
+
+              const leaderId = sourceMembers[0].user_id;
+              const newSquad = db.prepare(`
+                INSERT INTO squads (competition_id, name, leader_id, max_members)
+                VALUES (?, ?, ?, ?)
+              `).run(competitionId, source.name, leaderId, source.max_members || squadSize);
+
+              const newSquadId = newSquad.lastInsertRowid;
+
+              for (const member of sourceMembers) {
+                db.prepare(`
+                  INSERT OR IGNORE INTO squad_members (squad_id, user_id, status)
+                  VALUES (?, ?, 'ACTIVE')
+                `).run(newSquadId, member.user_id);
+                playersAssigned++;
+              }
+
+              squadsCreated++;
+            }
+
+            return { squadsCreated, playersAssigned };
+          });
+
+          const result = cloneResult();
+          return res.json({
+            success: true,
+            mode: 'FIXED_SQUAD',
+            source_tournament_id: previousTournament.id,
+            squads_created: result.squadsCreated,
+            players_assigned: result.playersAssigned,
+          });
+        }
+      }
+
       const users = db.prepare(`
         SELECT u.google_id
         FROM users u
@@ -419,10 +545,160 @@ async function startServer() {
       });
 
       const result = draftResult();
-      res.json({ success: true, squads_created: result.squadsCreated, players_assigned: result.playersAssigned });
+      res.json({
+        success: true,
+        mode: leagueMode,
+        squads_created: result.squadsCreated,
+        players_assigned: result.playersAssigned,
+      });
     } catch (e) {
       console.error('Draft error:', e);
       res.status(500).json({ error: "Failed to execute draft" });
+    }
+  });
+
+  // API: Resetear squads de un torneo
+  app.post("/api/tournaments/:id/reset-squads", (req, res) => {
+    const competitionId = Number(req.params.id);
+    if (!competitionId) return res.status(400).json({ error: "competition_id inválido" });
+
+    try {
+      const resetTx = db.transaction(() => {
+        const squads = db.prepare('SELECT id FROM squads WHERE competition_id = ?').all(competitionId) as Array<{ id: number }>;
+        for (const squad of squads) {
+          db.prepare('DELETE FROM squad_members WHERE squad_id = ?').run(squad.id);
+        }
+        db.prepare('DELETE FROM squads WHERE competition_id = ?').run(competitionId);
+        return squads.length;
+      });
+
+      const removedSquads = resetTx();
+      res.json({ success: true, removed_squads: removedSquads });
+    } catch (e) {
+      console.error('Error resetting squads:', e);
+      res.status(500).json({ error: 'Failed to reset squads' });
+    }
+  });
+
+  // API: Resumen operativo real para Admin Torneo (sin mock data)
+  app.get("/api/admin/overview", (req, res) => {
+    const leagueId = req.query.league_id ? Number(req.query.league_id) : null;
+    const tournamentId = req.query.tournament_id ? Number(req.query.tournament_id) : null;
+
+    try {
+      const league = leagueId
+        ? db.prepare(`
+            SELECT id, name, status, rules, start_date, end_date
+            FROM competitions
+            WHERE id = ? AND type = 'LIGA'
+          `).get(leagueId)
+        : null;
+
+      const tournament = tournamentId
+        ? db.prepare(`
+            SELECT id, name, status, rules, parent_league_id, start_date, end_date
+            FROM competitions
+            WHERE id = ? AND type = 'TORNEO'
+          `).get(tournamentId) as any
+        : null;
+
+      const parseRules = (raw: any) => {
+        if (!raw) return {} as any;
+        if (typeof raw === 'object') return raw;
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return {} as any;
+        }
+      };
+
+      const leagueMode = (() => {
+        const rules = parseRules((league as any)?.rules);
+        return String(rules.league_mode || 'RANDOM').toUpperCase() === 'FIXED_SQUAD' ? 'FIXED_SQUAD' : 'RANDOM';
+      })();
+
+      const targetMatches = Number(parseRules(tournament?.rules).matches_per_series || 0);
+
+      const leaguesCount = Number((db.prepare("SELECT COUNT(*) as c FROM competitions WHERE type = 'LIGA'").get() as any)?.c || 0);
+      const tournamentsCount = Number((db.prepare("SELECT COUNT(*) as c FROM competitions WHERE type = 'TORNEO'").get() as any)?.c || 0);
+      const playersCount = Number((db.prepare("SELECT COUNT(*) as c FROM users").get() as any)?.c || 0);
+
+      const squadsInTournament = tournamentId
+        ? Number((db.prepare('SELECT COUNT(*) as c FROM squads WHERE competition_id = ?').get(tournamentId) as any)?.c || 0)
+        : 0;
+
+      const matchesInTournament = tournamentId
+        ? Number((db.prepare('SELECT COUNT(*) as c FROM matches WHERE competition_id = ?').get(tournamentId) as any)?.c || 0)
+        : 0;
+
+      const killsToday = Number((db.prepare(`
+        SELECT COALESCE(SUM(s.kills), 0) as total
+        FROM stats s
+        JOIN matches m ON m.match_id = s.match_id
+        WHERE DATE(m.processed_at) = DATE('now', 'localtime')
+      `).get() as any)?.total || 0);
+
+      const avgDamageTournament = tournamentId
+        ? Number((db.prepare(`
+            SELECT COALESCE(ROUND(AVG(s.damage), 0), 0) as avg_damage
+            FROM stats s
+            JOIN matches m ON m.match_id = s.match_id
+            WHERE m.competition_id = ?
+          `).get(tournamentId) as any)?.avg_damage || 0)
+        : 0;
+
+      const recentActivity = db.prepare(`
+        SELECT
+          m.match_id,
+          m.processed_at,
+          COALESCE(u.gamertag, m.submitted_by, 'Sistema') as submitted_by,
+          COALESCE(SUM(s.kills), 0) as total_kills,
+          COALESCE(SUM(s.points), 0) as total_points
+        FROM matches m
+        LEFT JOIN users u ON u.google_id = m.submitted_by
+        LEFT JOIN stats s ON s.match_id = m.match_id
+        WHERE (? IS NULL OR m.competition_id = ?)
+        GROUP BY m.match_id, m.processed_at, submitted_by
+        ORDER BY m.processed_at DESC
+        LIMIT 8
+      `).all(tournamentId, tournamentId);
+
+      res.json({
+        league: league
+          ? {
+              id: (league as any).id,
+              name: (league as any).name,
+              status: (league as any).status,
+              league_mode: leagueMode,
+              start_date: (league as any).start_date,
+              end_date: (league as any).end_date,
+            }
+          : null,
+        tournament: tournament
+          ? {
+              id: tournament.id,
+              name: tournament.name,
+              status: tournament.status,
+              parent_league_id: tournament.parent_league_id,
+              start_date: tournament.start_date,
+              end_date: tournament.end_date,
+              target_matches: targetMatches,
+            }
+          : null,
+        stats: {
+          leagues_count: leaguesCount,
+          tournaments_count: tournamentsCount,
+          players_count: playersCount,
+          squads_in_tournament: squadsInTournament,
+          matches_in_tournament: matchesInTournament,
+          kills_today: killsToday,
+          avg_damage_tournament: avgDamageTournament,
+        },
+        recent_activity: recentActivity,
+      });
+    } catch (e) {
+      console.error('Error in /api/admin/overview:', e);
+      res.status(500).json({ error: 'Failed to fetch admin overview' });
     }
   });
 
@@ -854,6 +1130,28 @@ async function startServer() {
       res.json(matches);
     } catch (error) {
       console.error('Error in /api/matches:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  });
+
+  // API: Detalle de jugadores por partida
+  app.get("/api/matches/:match_id/members", (req, res) => {
+    const { match_id } = req.params;
+    try {
+      const members = db.prepare(`
+        SELECT
+          u.gamertag,
+          COALESCE(s.kills, 0) as kills,
+          COALESCE(s.damage, 0) as damage,
+          COALESCE(s.points, 0) as score
+        FROM stats s
+        JOIN users u ON u.google_id = s.user_id
+        WHERE s.match_id = ?
+        ORDER BY s.points DESC, s.kills DESC
+      `).all(match_id);
+      res.json(members);
+    } catch (error) {
+      console.error('Error in /api/matches/:match_id/members:', error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   });

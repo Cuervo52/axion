@@ -1,67 +1,49 @@
 import { History, Image as ImageIcon, Users, Clock, ChevronDown, ChevronUp, ArrowDown, ArrowUp } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useState } from 'react';
-
-// Datos de prueba (Mock Data)
-const mockMatches = [
-  {
-    id: 'M-1024',
-    squad: 'Los Malandros',
-    date: 'Hoy, 14:30',
-    mode: 'Resurgimiento Quads',
-    position: '1st',
-    totalKills: 35,
-    totalScore: 12500,
-    thumbnail: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&q=80&w=200&h=120',
-    members: [
-      { gamertag: 'OPBorked', kills: 12, damage: 4500, score: 3200 },
-      { gamertag: 'ElBarto', kills: 8, damage: 3200, score: 2800 },
-      { gamertag: 'SniperWolf', kills: 10, damage: 3800, score: 3500 },
-      { gamertag: 'NoobMaster', kills: 5, damage: 1500, score: 3000 },
-    ]
-  },
-  {
-    id: 'M-1023',
-    squad: 'Team Alpha',
-    date: 'Hoy, 13:45',
-    mode: 'Battle Royale Quads',
-    position: '3rd',
-    totalKills: 22,
-    totalScore: 8400,
-    thumbnail: 'https://images.unsplash.com/photo-1552820728-8b83bb6b773f?auto=format&fit=crop&q=80&w=200&h=120',
-    members: [
-      { gamertag: 'Alpha1', kills: 10, damage: 4000, score: 3000 },
-      { gamertag: 'Alpha2', kills: 4, damage: 1200, score: 1800 },
-      { gamertag: 'Alpha3', kills: 5, damage: 1800, score: 2000 },
-      { gamertag: 'Alpha4', kills: 3, damage: 1000, score: 1600 },
-    ]
-  },
-  {
-    id: 'M-1022',
-    squad: 'Ghost Squad',
-    date: 'Ayer, 22:15',
-    mode: 'Resurgimiento Quads',
-    position: '5th',
-    totalKills: 18,
-    totalScore: 6200,
-    thumbnail: 'https://images.unsplash.com/photo-1538481199005-c710c4e965fc?auto=format&fit=crop&q=80&w=200&h=120',
-    members: [
-      { gamertag: 'Ghost', kills: 8, damage: 3000, score: 2500 },
-      { gamertag: 'Soap', kills: 6, damage: 2500, score: 2000 },
-      { gamertag: 'Price', kills: 4, damage: 1500, score: 1700 },
-    ]
-  }
-];
+import { useEffect, useState } from 'react';
 
 type SortField = 'date' | 'totalKills' | 'totalScore';
 
 export default function Partidas() {
+  const [matches, setMatches] = useState<any[]>([]);
+  const [matchMembers, setMatchMembers] = useState<Record<string, any[]>>({});
+  const [isLoading, setIsLoading] = useState(true);
   const [expandedMatch, setExpandedMatch] = useState<string | null>(null);
   const [sortField, setSortField] = useState<SortField>('date');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
+  useEffect(() => {
+    const fetchMatches = async () => {
+      try {
+        const res = await fetch('/api/matches');
+        const data = await res.json();
+        setMatches(data || []);
+      } catch (e) {
+        console.error('Failed to fetch matches', e);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchMatches();
+  }, []);
+
+  const loadMembers = async (matchId: string) => {
+    if (matchMembers[matchId]) return;
+    try {
+      const res = await fetch(`/api/matches/${encodeURIComponent(matchId)}/members`);
+      const data = await res.json();
+      setMatchMembers((prev) => ({ ...prev, [matchId]: data || [] }));
+    } catch (e) {
+      console.error('Failed to fetch match members', e);
+      setMatchMembers((prev) => ({ ...prev, [matchId]: [] }));
+    }
+  };
+
   const toggleExpand = (id: string) => {
-    setExpandedMatch(expandedMatch === id ? null : id);
+    const next = expandedMatch === id ? null : id;
+    setExpandedMatch(next);
+    if (next) loadMembers(next);
   };
 
   const handleSort = (field: SortField) => {
@@ -73,11 +55,10 @@ export default function Partidas() {
     }
   };
 
-  const sortedMatches = [...mockMatches].sort((a, b) => {
+  const sortedMatches = [...matches].sort((a, b) => {
     const multiplier = sortDirection === 'asc' ? 1 : -1;
     if (sortField === 'date') {
-      // Mock date sorting (just using ID as proxy for now since dates are strings like "Hoy")
-      return (b.id.localeCompare(a.id)) * multiplier; 
+      return (new Date(a.date).getTime() - new Date(b.date).getTime()) * multiplier;
     }
     return (a[sortField] - b[sortField]) * multiplier;
   });
@@ -121,6 +102,10 @@ export default function Partidas() {
       </div>
 
       <div className="space-y-4">
+        {isLoading && (
+          <div className="text-center text-slate-500 text-sm py-8">Cargando historial...</div>
+        )}
+
         {sortedMatches.map((match) => (
           <div 
             key={match.id} 
@@ -152,7 +137,7 @@ export default function Partidas() {
                   <div>
                     <h3 className="font-bold text-white text-base">{match.squad}</h3>
                     <div className="flex items-center gap-2 text-xs text-slate-400 mt-1">
-                      <span className="flex items-center gap-1"><Clock size={12}/> {match.date}</span>
+                      <span className="flex items-center gap-1"><Clock size={12}/> {new Date(match.date).toLocaleString()}</span>
                       <span>•</span>
                       <span className="truncate max-w-[120px] text-purple-300/80">{match.mode}</span>
                     </div>
@@ -201,7 +186,7 @@ export default function Partidas() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/5">
-                        {match.members.map((member, idx) => (
+                        {(matchMembers[match.id] || []).map((member, idx) => (
                           <tr key={idx} className="hover:bg-white/5 transition-colors">
                             <td className="py-2 pl-2 font-medium text-slate-300">{member.gamertag}</td>
                             <td className="py-2 text-center font-mono text-white">{member.kills}</td>
@@ -209,6 +194,11 @@ export default function Partidas() {
                             <td className="py-2 text-right pr-2 font-mono text-purple-400">{member.score}</td>
                           </tr>
                         ))}
+                        {(matchMembers[match.id] || []).length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="py-3 text-center text-slate-500">Sin detalle de jugadores.</td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
@@ -217,6 +207,10 @@ export default function Partidas() {
             </AnimatePresence>
           </div>
         ))}
+
+        {!isLoading && sortedMatches.length === 0 && (
+          <div className="text-center text-slate-500 text-sm py-8">No hay partidas registradas aún.</div>
+        )}
       </div>
     </motion.div>
   );

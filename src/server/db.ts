@@ -123,6 +123,59 @@ export function initDb() {
     )
   `);
 
+  // Migracion: squads legacy con leader_phone -> leader_id
+  try {
+    const squadsInfo = db.prepare("PRAGMA table_info(squads)").all() as any[];
+    const squadsCols = squadsInfo.map(c => c.name);
+
+    if (squadsCols.includes('leader_phone') && !squadsCols.includes('leader_id')) {
+      console.log('Migrando tabla squads: leader_phone -> leader_id...');
+      db.exec('ALTER TABLE squads RENAME TO squads_old');
+
+      db.exec(`
+        CREATE TABLE squads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          competition_id INTEGER,
+          name TEXT NOT NULL,
+          leader_id TEXT NOT NULL,
+          max_members INTEGER DEFAULT 4,
+          FOREIGN KEY (competition_id) REFERENCES competitions(id),
+          FOREIGN KEY (leader_id) REFERENCES users(google_id)
+        )
+      `);
+
+      db.exec(`
+        INSERT OR IGNORE INTO users (google_id, email, gamertag, role, phone)
+        SELECT
+          'legacy-leader-' || REPLACE(COALESCE(s.leader_phone, 'unknown'), '+', '') || '-' || s.id,
+          'legacy-leader-' || REPLACE(COALESCE(s.leader_phone, 'unknown'), '+', '') || '-' || s.id || '@temp.com',
+          'Leader-' || COALESCE(s.leader_phone, CAST(s.id AS TEXT)),
+          'PLAYER',
+          s.leader_phone
+        FROM squads_old s
+        LEFT JOIN users u ON u.phone = s.leader_phone
+        WHERE u.google_id IS NULL
+      `);
+
+      db.exec(`
+        INSERT OR IGNORE INTO squads (id, competition_id, name, leader_id, max_members)
+        SELECT
+          s.id,
+          s.competition_id,
+          s.name,
+          COALESCE(
+            u.google_id,
+            'legacy-leader-' || REPLACE(COALESCE(s.leader_phone, 'unknown'), '+', '') || '-' || s.id
+          ) AS mapped_leader_id,
+          4
+        FROM squads_old s
+        LEFT JOIN users u ON u.phone = s.leader_phone
+      `);
+    }
+  } catch (e) {
+    console.error("Error migrando squads:", e);
+  }
+
   // Miembros de Squad con Invitaciones
   db.exec(`
     CREATE TABLE IF NOT EXISTS squad_members (
@@ -182,6 +235,33 @@ export function initDb() {
           sm.status
         FROM squad_members_old sm
         LEFT JOIN users u ON u.phone = sm.user_phone
+      `);
+    }
+
+    // Reparacion: si la FK quedo referenciando squads_old, reconstruir tabla
+    const fkList = db.prepare("PRAGMA foreign_key_list(squad_members)").all() as any[];
+    const referencesOldSquads = fkList.some((fk) => fk.table === 'squads_old');
+
+    if (referencesOldSquads) {
+      console.log('Reparando FK de squad_members -> squads...');
+      db.exec('ALTER TABLE squad_members RENAME TO squad_members_tmp_fix');
+
+      db.exec(`
+        CREATE TABLE squad_members (
+          squad_id INTEGER,
+          user_id TEXT,
+          joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          status TEXT DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'ACTIVE', 'LEFT', 'REJECTED')),
+          PRIMARY KEY (squad_id, user_id),
+          FOREIGN KEY (squad_id) REFERENCES squads(id),
+          FOREIGN KEY (user_id) REFERENCES users(google_id)
+        )
+      `);
+
+      db.exec(`
+        INSERT OR IGNORE INTO squad_members (squad_id, user_id, joined_at, status)
+        SELECT squad_id, user_id, joined_at, status
+        FROM squad_members_tmp_fix
       `);
     }
   } catch (e) {
