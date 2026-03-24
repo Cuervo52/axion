@@ -11,13 +11,52 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS users (
       google_id TEXT PRIMARY KEY,
       email TEXT UNIQUE,
-      gamertag TEXT NOT NULL UNIQUE, -- Formato: Nombre#1234
+      gamertag TEXT NOT NULL UNIQUE,
       avatar_url TEXT,
       phone TEXT,
       role TEXT DEFAULT 'PLAYER' CHECK(role IN ('SUPER_ADMIN', 'ADMIN', 'PLAYER')),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migración: Asegurar que google_id existe si la tabla fue creada con el esquema viejo
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(users)").all() as any[];
+    const columns = tableInfo.map(c => c.name);
+
+    if (!columns.includes('google_id')) {
+      console.log('Migrando tabla users: agregando google_id...');
+      db.exec("ALTER TABLE users RENAME TO users_old");
+      db.exec(`
+        CREATE TABLE users (
+          google_id TEXT PRIMARY KEY,
+          email TEXT UNIQUE,
+          gamertag TEXT NOT NULL UNIQUE,
+          avatar_url TEXT,
+          phone TEXT,
+          role TEXT DEFAULT 'PLAYER' CHECK(role IN ('SUPER_ADMIN', 'ADMIN', 'PLAYER')),
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
+      const oldTableInfo = db.prepare("PRAGMA table_info(users_old)").all() as any[];
+      const oldColumns = oldTableInfo.map(c => c.name);
+
+      if (oldColumns.includes('email')) {
+        db.exec(`
+          INSERT OR IGNORE INTO users (google_id, email, gamertag, role)
+          SELECT COALESCE(email, 'temp-' || ROWID), email, gamertag, role FROM users_old
+        `);
+      } else {
+        db.exec(`
+          INSERT OR IGNORE INTO users (google_id, gamertag, role)
+          SELECT 'temp-' || ROWID, gamertag, role FROM users_old
+        `);
+      }
+    }
+  } catch (e) {
+    console.error("Error migrando usuarios:", e);
+  }
 
   // Ligas y Torneos
   db.exec(`
@@ -28,12 +67,48 @@ export function initDb() {
       status TEXT DEFAULT 'OPEN' CHECK(status IN ('OPEN', 'ACTIVE', 'FINISHED')),
       admin_id TEXT,
       invite_code TEXT UNIQUE,
+      parent_league_id INTEGER,
+      counts_for_league INTEGER DEFAULT 0 CHECK(counts_for_league IN (0, 1)),
       rules TEXT,
       start_date DATETIME,
       end_date DATETIME,
-      FOREIGN KEY (admin_id) REFERENCES users(google_id)
+      FOREIGN KEY (admin_id) REFERENCES users(google_id),
+      FOREIGN KEY (parent_league_id) REFERENCES competitions(id)
     )
   `);
+
+  // Migracion: extender competitions en instalaciones existentes
+  try {
+    const compInfo = db.prepare("PRAGMA table_info(competitions)").all() as any[];
+    const compCols = compInfo.map(c => c.name);
+
+    if (!compCols.includes('admin_id')) {
+      db.exec("ALTER TABLE competitions ADD COLUMN admin_id TEXT");
+    }
+
+    if (!compCols.includes('parent_league_id')) {
+      db.exec("ALTER TABLE competitions ADD COLUMN parent_league_id INTEGER");
+    }
+    if (!compCols.includes('counts_for_league')) {
+      db.exec("ALTER TABLE competitions ADD COLUMN counts_for_league INTEGER DEFAULT 0 CHECK(counts_for_league IN (0, 1))");
+    }
+
+    // Backfill legacy admin_phone -> admin_id cuando exista mapeo por users.phone
+    if (compCols.includes('admin_phone')) {
+      db.exec(`
+        UPDATE competitions
+        SET admin_id = (
+          SELECT u.google_id
+          FROM users u
+          WHERE u.phone = competitions.admin_phone
+          LIMIT 1
+        )
+        WHERE admin_id IS NULL
+      `);
+    }
+  } catch (e) {
+    console.error("Error migrando competitions:", e);
+  }
 
   // Tabla de Squads
   db.exec(`
@@ -60,6 +135,58 @@ export function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(google_id)
     )
   `);
+
+  // Migracion: squad_members legacy con user_phone -> user_id
+  try {
+    const squadMembersInfo = db.prepare("PRAGMA table_info(squad_members)").all() as any[];
+    const squadMembersCols = squadMembersInfo.map(c => c.name);
+
+    if (squadMembersCols.includes('user_phone') && !squadMembersCols.includes('user_id')) {
+      console.log('Migrando tabla squad_members: user_phone -> user_id...');
+      db.exec('ALTER TABLE squad_members RENAME TO squad_members_old');
+
+      db.exec(`
+        CREATE TABLE squad_members (
+          squad_id INTEGER,
+          user_id TEXT,
+          joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          status TEXT DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'ACTIVE', 'LEFT', 'REJECTED')),
+          PRIMARY KEY (squad_id, user_id),
+          FOREIGN KEY (squad_id) REFERENCES squads(id),
+          FOREIGN KEY (user_id) REFERENCES users(google_id)
+        )
+      `);
+
+      db.exec(`
+        INSERT OR IGNORE INTO users (google_id, email, gamertag, role, phone)
+        SELECT
+          'legacy-' || REPLACE(COALESCE(sm.user_phone, 'unknown'), '+', '') || '-sq-' || sm.squad_id,
+          'legacy-' || REPLACE(COALESCE(sm.user_phone, 'unknown'), '+', '') || '-sq-' || sm.squad_id || '@temp.com',
+          'Legacy-' || COALESCE(sm.user_phone, CAST(sm.squad_id AS TEXT)),
+          'PLAYER',
+          sm.user_phone
+        FROM squad_members_old sm
+        LEFT JOIN users u ON u.phone = sm.user_phone
+        WHERE u.google_id IS NULL
+      `);
+
+      db.exec(`
+        INSERT OR IGNORE INTO squad_members (squad_id, user_id, joined_at, status)
+        SELECT
+          sm.squad_id,
+          COALESCE(
+            u.google_id,
+            'legacy-' || REPLACE(COALESCE(sm.user_phone, 'unknown'), '+', '') || '-sq-' || sm.squad_id
+          ) AS mapped_user_id,
+          sm.joined_at,
+          sm.status
+        FROM squad_members_old sm
+        LEFT JOIN users u ON u.phone = sm.user_phone
+      `);
+    }
+  } catch (e) {
+    console.error("Error migrando squad_members:", e);
+  }
 
   // Tabla de Partidas
   db.exec(`
@@ -88,6 +215,78 @@ export function initDb() {
       placement_points INTEGER DEFAULT 0,
       UNIQUE(match_id, user_id),
       FOREIGN KEY (match_id) REFERENCES matches(match_id),
+      FOREIGN KEY (user_id) REFERENCES users(google_id)
+    )
+  `);
+
+  // Migracion: stats legacy con user_phone -> user_id
+  try {
+    const statsInfo = db.prepare("PRAGMA table_info(stats)").all() as any[];
+    const statsCols = statsInfo.map(c => c.name);
+
+    if (statsCols.includes('user_phone') && !statsCols.includes('user_id')) {
+      console.log('Migrando tabla stats: user_phone -> user_id...');
+      db.exec('ALTER TABLE stats RENAME TO stats_old');
+
+      db.exec(`
+        CREATE TABLE stats (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          match_id TEXT,
+          user_id TEXT,
+          kills INTEGER DEFAULT 0,
+          points INTEGER DEFAULT 0,
+          damage INTEGER DEFAULT 0,
+          assists INTEGER DEFAULT 0,
+          placement_points INTEGER DEFAULT 0,
+          UNIQUE(match_id, user_id),
+          FOREIGN KEY (match_id) REFERENCES matches(match_id),
+          FOREIGN KEY (user_id) REFERENCES users(google_id)
+        )
+      `);
+
+      // Crear usuarios temporales para stats historicas sin mapeo por phone
+      db.exec(`
+        INSERT OR IGNORE INTO users (google_id, email, gamertag, role, phone)
+        SELECT
+          'legacy-' || REPLACE(COALESCE(s.user_phone, 'unknown'), '+', '') || '-' || s.id,
+          'legacy-' || REPLACE(COALESCE(s.user_phone, 'unknown'), '+', '') || '-' || s.id || '@temp.com',
+          'Legacy-' || COALESCE(s.user_phone, CAST(s.id AS TEXT)),
+          'PLAYER',
+          s.user_phone
+        FROM stats_old s
+        LEFT JOIN users u ON u.phone = s.user_phone
+        WHERE u.google_id IS NULL
+      `);
+
+      db.exec(`
+        INSERT OR IGNORE INTO stats (id, match_id, user_id, kills, points, damage, assists, placement_points)
+        SELECT
+          s.id,
+          s.match_id,
+          COALESCE(
+            u.google_id,
+            'legacy-' || REPLACE(COALESCE(s.user_phone, 'unknown'), '+', '') || '-' || s.id
+          ) AS mapped_user_id,
+          s.kills,
+          s.points,
+          s.damage,
+          s.assists,
+          s.placement_points
+        FROM stats_old s
+        LEFT JOIN users u ON u.phone = s.user_phone
+      `);
+    }
+  } catch (e) {
+    console.error("Error migrando stats:", e);
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tournament_organizers (
+      competition_id INTEGER,
+      user_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (competition_id, user_id),
+      FOREIGN KEY (competition_id) REFERENCES competitions(id),
       FOREIGN KEY (user_id) REFERENCES users(google_id)
     )
   `);

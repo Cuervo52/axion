@@ -17,9 +17,21 @@ export default function Equipos() {
 
   const fetchSquads = async () => {
     try {
-      const res = await fetch('/api/leaderboard');
+
+      const res = await fetch('/api/leaderboard/equipos');
       const data = await res.json();
-      setSquads(data);
+
+      const normalized = (data || []).map((row: any) => ({
+        squad_id: row.id,
+        squad_name: row.name,
+        points: Number(row.points || 0),
+        kills: Number(row.kills || 0),
+        matches: Number(row.matches || 0),
+        kd: row.matches ? Number(row.kills || 0) / Number(row.matches || 1) : 0,
+        members_count: Array.isArray(row.members) ? row.members.length : 0,
+      }));
+
+      setSquads(normalized);
     } catch (e) {
       console.error("Failed to fetch leaderboard", e);
     } finally {

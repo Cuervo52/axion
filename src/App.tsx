@@ -22,8 +22,12 @@ interface UserData {
 }
 
 export default function App() {
-  const [user, setUser] = useState<UserData | null>(null);
+  const [user, setUser] = useState<UserData | null>(() => {
+    const saved = localStorage.getItem('axion_user');
+    return saved ? JSON.parse(saved) : null;
+  });
   const [activeTab, setActiveTab] = useState<'equipos' | 'individual' | 'partidas'>('equipos');
+  const [forceView, setForceView] = useState<string | null>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isScanOpen, setIsScanOpen] = useState(false);
@@ -36,34 +40,45 @@ export default function App() {
   const [isCreatingSquad, setIsCreatingSquad] = useState(false);
 
   const handleGoogleLogin = async (credentialResponse: any) => {
-    if (!credentialResponse.credential) return;
+    console.log("[AUTH] Google Login response received:", credentialResponse);
+    if (!credentialResponse.credential) {
+      console.error("[AUTH] No credential in response");
+      return;
+    }
 
     try {
       const decoded: any = jwtDecode(credentialResponse.credential);
+      console.log("[AUTH] Decoded JWT:", decoded);
       const google_id = decoded.sub;
       const email = decoded.email;
       const gamertag = decoded.name;
       const avatar_url = decoded.picture;
 
-      const res = await fetch('/api/auth/login', {
+      console.log(`[AUTH] Sending login request to backend for ${email}...`);
+      const loginRes = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ google_id, email, gamertag, avatar_url })
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ google_id, email, gamertag, avatar_url }),
       });
 
-      if (!res.ok) throw new Error('Error de conexión');
+      const loginData = await loginRes.json();
+      if (loginData.error) throw new Error(loginData.error);
 
-      const data = await res.json();
-      setUser(data);
+      setUser(loginData);
+      localStorage.setItem('axion_user', JSON.stringify(loginData));
 
-      if (data.gamertag === gamertag || data.gamertag.includes('PLAYER') || data.gamertag.includes('temp-')) {
+      if (loginData.gamertag === gamertag || loginData.gamertag.includes('PLAYER') || loginData.gamertag.includes('temp-')) {
+        console.log("[AUTH] Profile setup required");
         setIsProfileSetupOpen(true);
       } else {
-        fetchSquadData(data.google_id);
-        fetchInvitations(data.google_id);
+        console.log("[AUTH] Proceeding to dashboard");
+        fetchSquadData(loginData.google_id);
+        fetchInvitations(loginData.google_id);
       }
     } catch (e) {
-      console.error("Login failed", e);
+      console.error("[AUTH] Login process failed:", e);
     }
   };
 
@@ -105,8 +120,11 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ google_id: user.google_id, gamertag: tag, avatar_url: avatar })
       });
-      const updatedUser = await res.json();
-      setUser(updatedUser);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      setUser(data);
+      localStorage.setItem('axion_user', JSON.stringify(data));
       setIsProfileSetupOpen(false);
 
       // Intentar cargar squad después de configurar perfil
@@ -154,6 +172,17 @@ export default function App() {
       setSearchResults([]);
     }
   }, [searchQuery]);
+
+  useEffect(() => {
+    if (user) {
+      if (!user.gamertag || user.gamertag.includes('PLAYER') || user.gamertag.includes('temp-')) {
+        setIsProfileSetupOpen(true);
+      } else {
+        fetchSquadData(user.google_id);
+        fetchInvitations(user.google_id);
+      }
+    }
+  }, []); // Run once on mount to load initial data if user is stored in localStorage
 
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve) => {
@@ -223,76 +252,379 @@ export default function App() {
     );
   }
 
-  // SaaS Admin check (Direct by role)
-  if (user.role === 'SUPER_ADMIN') {
-    return <SuperAdmin />;
-  }
+  const viewMode: ViewMode = (forceView as any) || (user.role === 'ADMIN' ? 'admin-torneo' : 'user');
 
-  const viewMode: ViewMode = user.role === 'ADMIN' ? 'admin-torneo' : 'user';
   return (
     <div className="min-h-screen bg-[#050505] text-slate-200 font-sans selection:bg-purple-500/30 pb-24 transition-colors duration-300 relative overflow-hidden">
 
-      {/* Sidebar Menu */}
-      <AnimatePresence>
-        {isMenuOpen && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsMenuOpen(false)}
-              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60]"
-            />
-            <motion.div
-              initial={{ x: '-100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '-100%' }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="fixed top-0 left-0 bottom-0 w-3/4 max-w-xs bg-[#0B0E14] border-r border-white/10 z-[70] p-6 flex flex-col shadow-2xl"
-            >
-              <div className="flex justify-between items-center mb-8">
-                <span className="text-xl font-black tracking-[0.2em] text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-yellow-400 uppercase">
+      {user.role === 'SUPER_ADMIN' && !forceView ? (
+        <SuperAdmin onSwitchView={(v: string) => setForceView(v)} />
+      ) : (
+        <>
+          {/* Header AXION */}
+          <header className="bg-[#0B0E14]/80 backdrop-blur-md border-b border-white/5 pt-4 pb-2 px-4 sticky top-0 z-50">
+            <div className="flex items-center justify-between mb-4 w-full max-w-7xl mx-auto">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-black tracking-[0.2em] text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-yellow-400 uppercase">
                   AXION
                 </span>
-                <button onClick={() => setIsMenuOpen(false)} className="p-2 hover:bg-white/5 rounded-full text-slate-400 hover:text-white transition-colors">
-                  <X size={20} />
+                <div className="bg-purple-500/10 border border-purple-500/20 text-purple-400 text-[8px] font-bold px-1.5 py-0.5 rounded">BETA</div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={() => setIsMenuOpen(true)}>
+                  <Menu size={20} className="text-slate-400 hover:text-white transition-colors" />
                 </button>
               </div>
+            </div>
 
-              <div className="space-y-6 flex-1">
-                <div className="space-y-2">
-                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 px-2">Navegación</h3>
-                  <button onClick={() => { setActiveTab('equipos'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                    <Users size={18} className="text-purple-500" /> Equipos
-                  </button>
-                  <button onClick={() => { setActiveTab('individual'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                    <User size={18} className="text-purple-500" /> Individual
-                  </button>
-                  <button onClick={() => { setActiveTab('partidas'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                    <History size={18} className="text-purple-500" /> Partidas
-                  </button>
+            {/* User Profile Section (Only visible in User Mode) */}
+            {viewMode === 'user' && (
+              <div className="flex items-center gap-4 mb-4 w-full max-w-7xl mx-auto">
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-600 to-yellow-500 p-[1px] shadow-[0_0_15px_rgba(168,85,247,0.4)]">
+                  <div className="w-full h-full rounded-xl bg-[#0B0E14] flex items-center justify-center overflow-hidden">
+                    <img src={user.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.gamertag}`} alt="Avatar" referrerPolicy="no-referrer" />
+                  </div>
                 </div>
-
-                <div className="space-y-2">
-                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 px-2">Torneos</h3>
-                  <button className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                    <Trophy size={18} className="text-yellow-500" /> Mis Torneos
-                  </button>
-                  <button className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                    <Search size={18} className="text-slate-500" /> Buscar Torneo
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h1 className="text-lg font-bold tracking-tight text-white">{user.gamertag}</h1>
+                    <span className="text-[10px] text-slate-400 font-mono bg-white/5 px-1.5 py-0.5 rounded border border-white/5">#{user.google_id.slice(-6)}</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px] text-slate-400 font-medium mt-0.5">
+                    <Trophy size={10} className="text-yellow-500" /> {user.role}
+                  </div>
+                </div>
+                <div className="ml-auto">
+                  <button
+                    onClick={() => setIsSettingsOpen(true)}
+                    className="p-2 bg-white/5 rounded-lg border border-white/5 hover:bg-white/10 transition-colors"
+                  >
+                    <Settings size={16} className="text-slate-400" />
                   </button>
                 </div>
               </div>
+            )}
 
-              <div className="pt-6 border-t border-white/10">
-                <button className="w-full flex items-center gap-3 px-3 py-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors">
-                  <LogOut size={18} /> Cerrar Sesión
+            {/* Admin Headers */}
+            {viewMode === 'admin-torneo' && (
+              <div className="mb-4 w-full max-w-7xl mx-auto">
+                <div className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Modo</div>
+                <div className="text-xl font-black text-white">Organizador</div>
+              </div>
+            )}
+
+            {/* Tabs Superiores (Only in User Mode) */}
+            {viewMode === 'user' && (
+              <div className="flex gap-6 overflow-x-auto no-scrollbar border-b border-white/5 w-full max-w-7xl mx-auto">
+                {['equipos', 'individual', 'partidas'].map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveTab(tab as any)}
+                    className={`pb-3 text-xs font-bold uppercase tracking-widest transition-all relative ${activeTab === tab ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'
+                      }`}
+                  >
+                    {tab}
+                    {activeTab === tab && (
+                      <motion.div
+                        layoutId="activeTab"
+                        className="absolute bottom-0 left-0 right-0 h-[2px] bg-gradient-to-r from-purple-500 to-yellow-500 rounded-t-full"
+                      />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </header>
+
+          {/* Sidebar Menu */}
+          <AnimatePresence>
+            {isMenuOpen && (
+              <>
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  onClick={() => setIsMenuOpen(false)}
+                  className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100]"
+                />
+                <motion.div
+                  initial={{ x: '-100%' }}
+                  animate={{ x: 0 }}
+                  exit={{ x: '-100%' }}
+                  transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+                  className="fixed top-0 left-0 bottom-0 w-3/4 max-w-xs bg-[#0B0E14] border-r border-white/10 z-[110] p-6 flex flex-col shadow-2xl"
+                >
+                  <div className="flex justify-between items-center mb-8">
+                    <span className="text-xl font-black tracking-[0.2em] text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-yellow-400 uppercase">
+                      AXION
+                    </span>
+                    <button onClick={() => setIsMenuOpen(false)} className="p-2 hover:bg-white/5 rounded-full text-slate-400 hover:text-white transition-colors">
+                      <X size={20} />
+                    </button>
+                  </div>
+
+                  <div className="space-y-6 flex-1">
+                    <div className="space-y-2">
+                      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 px-2">Navegación</h3>
+                      <button onClick={() => { setActiveTab('equipos'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                        <Users size={18} className="text-purple-500" /> Equipos
+                      </button>
+                      <button onClick={() => { setActiveTab('individual'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                        <User size={18} className="text-purple-500" /> Individual
+                      </button>
+                      <button onClick={() => { setActiveTab('partidas'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                        <History size={18} className="text-purple-500" /> Partidas
+                      </button>
+                    </div>
+
+                    <div className="space-y-2">
+                      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 px-2">Torneos</h3>
+                      <button className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                        <Trophy size={18} className="text-yellow-500" /> Mis Torneos
+                      </button>
+                      <button className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                        <Search size={18} className="text-slate-500" /> Buscar Torneo
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="pt-6 border-t border-white/10">
+                    <button onClick={() => { setUser(null); localStorage.removeItem('axion_user'); }} className="w-full flex items-center gap-3 px-3 py-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors">
+                      <LogOut size={18} /> Cerrar Sesión
+                    </button>
+                  </div>
+                </motion.div>
+              </>
+            )}
+          </AnimatePresence>
+
+          {/* Main Content Area */}
+          <main className="w-full max-w-7xl mx-auto px-4 mt-4 space-y-6">
+
+            {/* Invitations Alert */}
+            <AnimatePresence>
+              {invitations.length > 0 && invitations.map((inv) => (
+                <motion.div
+                  key={inv.squad_id}
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  className="bg-purple-600/20 border border-purple-500/30 rounded-2xl p-4 flex items-center justify-between overflow-hidden"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center">
+                      <Bell className="text-purple-400" size={20} />
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-white">¡Invitación a Squad!</p>
+                      <p className="text-[12px] text-purple-300"><b>{inv.leader_name}</b> te invitó a unirte a <b>{inv.squad_name}</b></p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleAcceptInvite(inv.squad_id)}
+                      className="px-4 py-2 bg-purple-600 rounded-xl text-[12px] font-bold hover:bg-purple-500 transition-all shadow-lg"
+                    >
+                      Aceptar
+                    </button>
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+
+            {/* Squad Area */}
+            {squad ? (
+              <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-purple-600/20 flex items-center justify-center text-purple-400">
+                      <Users size={20} />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-black text-white uppercase tracking-tight">{squad.name}</h2>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Tu Squad Actual</p>
+                    </div>
+                  </div>
+                  <span className="px-3 py-1 bg-green-500/10 text-green-400 text-[10px] font-bold rounded-full uppercase border border-green-500/20">Activo</span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                  {squad.members.map((member: any, i: number) => (
+                    <div key={i} className="flex items-center gap-3 p-3 bg-white/5 rounded-2xl border border-white/5">
+                      <div className="w-10 h-10 rounded-xl bg-slate-800 flex-shrink-0 relative overflow-hidden">
+                        {member.avatar_url ? (
+                          <img src={member.avatar_url} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-slate-700 to-slate-800" />
+                        )}
+                        {member.status === 'PENDING' && (
+                          <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                            <History size={16} className="text-slate-400 animate-pulse" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <p className={`text-xs font-bold truncate ${member.status === 'PENDING' ? 'text-slate-500 italic' : 'text-slate-200'}`}>
+                          {member.gamertag}
+                        </p>
+                        <p className="text-[10px] text-slate-500">{member.status === 'PENDING' ? 'Invitado...' : 'Miembro'}</p>
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Invitation Search (Only for Leader) */}
+                  {squad.members.length < (squad.max_members || 4) && squad.leader_id === user.google_id && (
+                    <div className="relative col-span-2 mt-2">
+                      <div className="flex items-center gap-2 bg-white/5 border border-dashed border-white/10 rounded-2xl p-2 px-3">
+                        <Search size={14} className="text-slate-500" />
+                        <input
+                          type="text"
+                          placeholder="Invitar jugador por Gamertag..."
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          className="bg-transparent border-none text-[12px] text-white focus:outline-none w-full"
+                        />
+                      </div>
+
+                      {/* Search Results Dropdown */}
+                      <AnimatePresence>
+                        {searchResults.length > 0 && (
+                          <motion.div
+                            initial={{ opacity: 0, y: -10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="absolute top-full left-0 right-0 mt-2 bg-[#161B22] border border-white/10 rounded-2xl shadow-2xl z-20 overflow-hidden"
+                          >
+                            {searchResults.map((res) => (
+                              <button
+                                key={res.google_id}
+                                onClick={() => inviteUser(res.google_id)}
+                                className="w-full p-3 flex items-center gap-3 hover:bg-white/5 transition-all border-b border-white/5 last:border-0"
+                              >
+                                <div className="w-8 h-8 rounded-lg bg-slate-800 overflow-hidden">
+                                  {res.avatar_url && <img src={res.avatar_url} className="w-full h-full object-cover" />}
+                                </div>
+                                <span className="text-xs font-bold text-white">{res.gamertag}</span>
+                                <span className="ml-auto text-[10px] text-purple-400 font-bold uppercase">Invitar</span>
+                              </button>
+                            ))}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              /* No Squad State */
+              <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-8 flex flex-col items-center text-center space-y-4">
+                <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center text-slate-600">
+                  <Users size={32} />
+                </div>
+                <div className="space-y-1">
+                  <h2 className="text-xl font-black text-white uppercase tracking-tight">No tienes Squad</h2>
+                  <p className="text-sm text-slate-400 max-w-xs mx-auto">Únete a uno o crea el tuyo para empezar a sumar puntos en equipo.</p>
+                </div>
+
+                {isCreatingSquad ? (
+                  <div className="w-full max-w-xs flex gap-2">
+                    <input
+                      id="new-squad-name"
+                      type="text"
+                      autoFocus
+                      placeholder="Nombre de tu Squad"
+                      className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+                    />
+                    <button
+                      onClick={() => {
+                        const input = document.getElementById('new-squad-name') as HTMLInputElement;
+                        createSquad(input.value);
+                      }}
+                      className="px-4 py-2 bg-purple-600 rounded-xl text-xs font-bold text-white hover:bg-purple-500 transition-all"
+                    >
+                      Crear
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setIsCreatingSquad(true)}
+                    className="px-8 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-sm font-bold text-white transition-all flex items-center gap-2"
+                  >
+                    <Plus size={18} className="text-purple-400" /> Crear mi propio Squad
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Dashboards Components */}
+            {viewMode === 'user' && (
+              <>
+                {activeTab === 'equipos' && <Equipos />}
+                {activeTab === 'individual' && <Individual />}
+                {activeTab === 'partidas' && <Partidas />}
+              </>
+            )}
+
+            {viewMode === 'admin-torneo' && <AdminTorneo />}
+          </main>
+
+          {/* Logout Floating Button */}
+          <div className="fixed bottom-24 right-4 z-50">
+            <button
+              onClick={() => {
+                setUser(null);
+                localStorage.removeItem('axion_user');
+              }}
+              className="p-3 rounded-full shadow-lg border bg-[#151921] border-white/10 text-red-400 hover:bg-red-500/10 transition-all"
+              title="Cerrar Sesión"
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
+
+          {/* Bottom Nav (Only in User Mode) */}
+          {viewMode === 'user' && (
+            <nav className="fixed bottom-0 left-0 right-0 bg-[#0B0E14]/90 backdrop-blur-xl border-t border-white/5 px-6 py-2 flex justify-between items-end z-40 w-full max-w-7xl mx-auto rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.5)] pb-6 md:hidden">
+              <button onClick={() => setActiveTab('equipos')} className={`flex flex-col items-center gap-1.5 transition-colors w-16 ${activeTab === 'equipos' ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'}`}>
+                <Users size={20} />
+                <span className="text-[8px] font-bold uppercase tracking-widest">Equipos</span>
+              </button>
+
+              {/* Central Scan Button */}
+              <div className="relative -top-6">
+                <button
+                  onClick={() => setIsScanOpen(true)}
+                  className="w-16 h-16 rounded-full bg-gradient-to-br from-purple-600 to-yellow-500 p-[2px] shadow-[0_0_20px_rgba(168,85,247,0.5)] hover:scale-105 transition-transform active:scale-95 flex items-center justify-center"
+                >
+                  <div className="w-full h-full rounded-full bg-[#151921] flex items-center justify-center">
+                    <ScanLine size={28} className="text-white" />
+                  </div>
                 </button>
+                <span className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-[8px] font-bold uppercase tracking-widest text-white">Escanear</span>
               </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+
+              <button onClick={() => setActiveTab('partidas')} className={`flex flex-col items-center gap-1.5 transition-colors w-16 ${activeTab === 'partidas' ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'}`}>
+                <History size={20} />
+                <span className="text-[8px] font-bold uppercase tracking-widest">Partidas</span>
+              </button>
+            </nav>
+          )}
+
+          {/* Desktop Scan Button (Floating) */}
+          {viewMode === 'user' && (
+            <div className="hidden md:block fixed bottom-8 right-8 z-40">
+              <button
+                onClick={() => setIsScanOpen(true)}
+                className="flex items-center gap-3 px-6 py-4 rounded-full bg-gradient-to-r from-purple-600 to-yellow-500 text-white font-bold shadow-2xl hover:scale-105 transition-transform"
+              >
+                <ScanLine size={24} />
+                ESCANEAR PARTIDA
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* GLOBAL MODALS ALWAYS RENDERED AT ROOT */}
 
       {/* Settings Modal */}
       <AnimatePresence>
@@ -303,7 +635,7 @@ export default function App() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsSettingsOpen(false)}
-              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4"
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[150] flex items-center justify-center p-4"
             >
               <motion.div
                 initial={{ scale: 0.9, opacity: 0 }}
@@ -379,13 +711,11 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Escanear Partida Modal */}
       <EscanearPartida isOpen={isScanOpen} onClose={() => setIsScanOpen(false)} />
 
-      {/* Profile Setup Modal */}
       <AnimatePresence>
         {isProfileSetupOpen && (
-          <div className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[100] flex items-center justify-center p-6 overflow-y-auto">
+          <div className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[200] flex items-center justify-center p-6 overflow-y-auto">
             <motion.div
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -397,7 +727,6 @@ export default function App() {
               </div>
 
               <div className="flex flex-col items-center gap-6">
-                {/* Avatar Upload */}
                 <div className="relative group cursor-pointer">
                   <div className="w-24 h-24 rounded-2xl bg-gradient-to-br from-purple-600 to-yellow-500 p-[1px] relative overflow-hidden">
                     <div className="w-full h-full rounded-2xl bg-[#0B0E14] flex items-center justify-center relative">
@@ -422,14 +751,13 @@ export default function App() {
                   />
                 </div>
 
-                {/* Gamertag Input */}
                 <div className="w-full space-y-2">
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Activision ID (Gamertag#1234)</label>
                   <input
                     id="gamertag-input"
                     type="text"
                     placeholder="Ej: SoapMactavish#117"
-                    defaultValue={user?.gamertag.includes('PLAYER') ? '' : user?.gamertag}
+                    defaultValue={user?.gamertag?.includes('PLAYER') ? '' : user?.gamertag}
                     className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-purple-500 transition-all font-mono"
                   />
                 </div>
@@ -450,302 +778,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Header AXION */}
-      <header className="bg-[#0B0E14]/80 backdrop-blur-md border-b border-white/5 pt-4 pb-2 px-4 sticky top-0 z-50">
-        <div className="flex items-center justify-between mb-4 w-full max-w-7xl mx-auto">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-black tracking-[0.2em] text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-yellow-400 uppercase">
-              AXION
-            </span>
-            <div className="bg-purple-500/10 border border-purple-500/20 text-purple-400 text-[8px] font-bold px-1.5 py-0.5 rounded">BETA</div>
-          </div>
-          <div className="flex items-center gap-3">
-            <button onClick={() => setIsMenuOpen(true)}>
-              <Menu size={20} className="text-slate-400 hover:text-white transition-colors" />
-            </button>
-          </div>
-        </div>
-
-        {/* User Profile Section (Only visible in User Mode) */}
-        {viewMode === 'user' && (
-          <div className="flex items-center gap-4 mb-4 w-full max-w-7xl mx-auto">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-600 to-yellow-500 p-[1px] shadow-[0_0_15px_rgba(168,85,247,0.4)]">
-              <div className="w-full h-full rounded-xl bg-[#0B0E14] flex items-center justify-center overflow-hidden">
-                <img src="https://api.dicebear.com/7.x/avataaars/svg?seed=OPBorked" alt="Avatar" referrerPolicy="no-referrer" />
-              </div>
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-bold tracking-tight text-white">{user.gamertag}</h1>
-                <span className="text-[10px] text-slate-400 font-mono bg-white/5 px-1.5 py-0.5 rounded border border-white/5">#{user.google_id.slice(-6)}</span>
-              </div>
-              <div className="flex items-center gap-2 text-[10px] text-slate-400 font-medium mt-0.5">
-                <Trophy size={10} className="text-yellow-500" /> {user.role}
-              </div>
-            </div>
-            <div className="ml-auto">
-              <button
-                onClick={() => setIsSettingsOpen(true)}
-                className="p-2 bg-white/5 rounded-lg border border-white/5 hover:bg-white/10 transition-colors"
-              >
-                <Settings size={16} className="text-slate-400" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Admin Headers */}
-        {viewMode === 'admin-torneo' && (
-          <div className="mb-4 w-full max-w-7xl mx-auto">
-            <div className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Modo</div>
-            <div className="text-xl font-black text-white">Organizador</div>
-          </div>
-        )}
-
-        {/* Tabs Superiores (Only in User Mode) */}
-        {viewMode === 'user' && (
-          <div className="flex gap-6 overflow-x-auto no-scrollbar border-b border-white/5 w-full max-w-7xl mx-auto">
-            {['equipos', 'individual', 'partidas'].map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab as any)}
-                className={`pb-3 text-xs font-bold uppercase tracking-widest transition-all relative ${activeTab === tab ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'
-                  }`}
-              >
-                {tab}
-                {activeTab === tab && (
-                  <motion.div
-                    layoutId="activeTab"
-                    className="absolute bottom-0 left-0 right-0 h-[2px] bg-gradient-to-r from-purple-500 to-yellow-500 rounded-t-full"
-                  />
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-      </header>
-
-      {/* Main Content Area */}
-      <main className="w-full max-w-7xl mx-auto px-4 mt-4 space-y-6">
-
-        {/* Invitations Alert */}
-        <AnimatePresence>
-          {invitations.length > 0 && invitations.map((inv) => (
-            <motion.div
-              key={inv.squad_id}
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="bg-purple-600/20 border border-purple-500/30 rounded-2xl p-4 flex items-center justify-between overflow-hidden"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center">
-                  <Bell className="text-purple-400" size={20} />
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-white">¡Invitación a Squad!</p>
-                  <p className="text-[12px] text-purple-300"><b>{inv.leader_name}</b> te invitó a unirte a <b>{inv.squad_name}</b></p>
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => handleAcceptInvite(inv.squad_id)}
-                  className="px-4 py-2 bg-purple-600 rounded-xl text-[12px] font-bold hover:bg-purple-500 transition-all shadow-lg"
-                >
-                  Aceptar
-                </button>
-              </div>
-            </motion.div>
-          ))}
-        </AnimatePresence>
-
-        {/* Squad Area */}
-        {squad ? (
-          <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-purple-600/20 flex items-center justify-center text-purple-400">
-                  <Users size={20} />
-                </div>
-                <div>
-                  <h2 className="text-lg font-black text-white uppercase tracking-tight">{squad.name}</h2>
-                  <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Tu Squad Actual</p>
-                </div>
-              </div>
-              <span className="px-3 py-1 bg-green-500/10 text-green-400 text-[10px] font-bold rounded-full uppercase border border-green-500/20">Activo</span>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              {squad.members.map((member: any, i: number) => (
-                <div key={i} className="flex items-center gap-3 p-3 bg-white/5 rounded-2xl border border-white/5">
-                  <div className="w-10 h-10 rounded-xl bg-slate-800 flex-shrink-0 relative overflow-hidden">
-                    {member.avatar_url ? (
-                      <img src={member.avatar_url} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full bg-gradient-to-br from-slate-700 to-slate-800" />
-                    )}
-                    {member.status === 'PENDING' && (
-                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-                        <History size={16} className="text-slate-400 animate-pulse" />
-                      </div>
-                    )}
-                  </div>
-                  <div className="min-w-0">
-                    <p className={`text-xs font-bold truncate ${member.status === 'PENDING' ? 'text-slate-500 italic' : 'text-slate-200'}`}>
-                      {member.gamertag}
-                    </p>
-                    <p className="text-[10px] text-slate-500">{member.status === 'PENDING' ? 'Invitado...' : 'Miembro'}</p>
-                  </div>
-                </div>
-              ))}
-
-              {/* Invitation Search (Only for Leader) */}
-              {squad.members.length < (squad.max_members || 4) && squad.leader_id === user.google_id && (
-                <div className="relative col-span-2 mt-2">
-                  <div className="flex items-center gap-2 bg-white/5 border border-dashed border-white/10 rounded-2xl p-2 px-3">
-                    <Search size={14} className="text-slate-500" />
-                    <input
-                      type="text"
-                      placeholder="Invitar jugador por Gamertag..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className="bg-transparent border-none text-[12px] text-white focus:outline-none w-full"
-                    />
-                  </div>
-
-                  {/* Search Results Dropdown */}
-                  <AnimatePresence>
-                    {searchResults.length > 0 && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="absolute top-full left-0 right-0 mt-2 bg-[#161B22] border border-white/10 rounded-2xl shadow-2xl z-50 overflow-hidden"
-                      >
-                        {searchResults.map((res) => (
-                          <button
-                            key={res.google_id}
-                            onClick={() => inviteUser(res.google_id)}
-                            className="w-full p-3 flex items-center gap-3 hover:bg-white/5 transition-all border-b border-white/5 last:border-0"
-                          >
-                            <div className="w-8 h-8 rounded-lg bg-slate-800 overflow-hidden">
-                              {res.avatar_url && <img src={res.avatar_url} className="w-full h-full object-cover" />}
-                            </div>
-                            <span className="text-xs font-bold text-white">{res.gamertag}</span>
-                            <span className="ml-auto text-[10px] text-purple-400 font-bold uppercase">Invitar</span>
-                          </button>
-                        ))}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          /* No Squad State */
-          <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-8 flex flex-col items-center text-center space-y-4">
-            <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center text-slate-600">
-              <Users size={32} />
-            </div>
-            <div className="space-y-1">
-              <h2 className="text-xl font-black text-white uppercase tracking-tight">No tienes Squad</h2>
-              <p className="text-sm text-slate-400 max-w-xs mx-auto">Únete a uno o crea el tuyo para empezar a sumar puntos en equipo.</p>
-            </div>
-
-            {isCreatingSquad ? (
-              <div className="w-full max-w-xs flex gap-2">
-                <input
-                  id="new-squad-name"
-                  type="text"
-                  autoFocus
-                  placeholder="Nombre de tu Squad"
-                  className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
-                />
-                <button
-                  onClick={() => {
-                    const input = document.getElementById('new-squad-name') as HTMLInputElement;
-                    createSquad(input.value);
-                  }}
-                  className="px-4 py-2 bg-purple-600 rounded-xl text-xs font-bold text-white hover:bg-purple-500 transition-all"
-                >
-                  Crear
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setIsCreatingSquad(true)}
-                className="px-8 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-sm font-bold text-white transition-all flex items-center gap-2"
-              >
-                <Plus size={18} className="text-purple-400" /> Crear mi propio Squad
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Dashboards Components */}
-        {viewMode === 'user' && (
-          <>
-            {activeTab === 'equipos' && <Equipos />}
-            {activeTab === 'individual' && <Individual />}
-            {activeTab === 'partidas' && <Partidas />}
-          </>
-        )}
-
-        {viewMode === 'admin-torneo' && <AdminTorneo />}
-      </main>
-
-      {/* Logout Floating Button */}
-      <div className="fixed bottom-24 right-4 z-50">
-        <button
-          onClick={() => setUser(null)}
-          className="p-3 rounded-full shadow-lg border bg-[#151921] border-white/10 text-red-400 hover:bg-red-500/10 transition-all"
-          title="Cerrar Sesión"
-        >
-          <LogOut size={16} />
-        </button>
-      </div>
-
-      {/* Bottom Nav (Only in User Mode) */}
-      {viewMode === 'user' && (
-        <nav className="fixed bottom-0 left-0 right-0 bg-[#0B0E14]/90 backdrop-blur-xl border-t border-white/5 px-6 py-2 flex justify-between items-end z-40 w-full max-w-7xl mx-auto rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.5)] pb-6 md:hidden">
-          <button onClick={() => setActiveTab('equipos')} className={`flex flex-col items-center gap-1.5 transition-colors w-16 ${activeTab === 'equipos' ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'}`}>
-            <Users size={20} />
-            <span className="text-[8px] font-bold uppercase tracking-widest">Equipos</span>
-          </button>
-
-          {/* Central Scan Button */}
-          <div className="relative -top-6">
-            <button
-              onClick={() => setIsScanOpen(true)}
-              className="w-16 h-16 rounded-full bg-gradient-to-br from-purple-600 to-yellow-500 p-[2px] shadow-[0_0_20px_rgba(168,85,247,0.5)] hover:scale-105 transition-transform active:scale-95 flex items-center justify-center"
-            >
-              <div className="w-full h-full rounded-full bg-[#151921] flex items-center justify-center">
-                <ScanLine size={28} className="text-white" />
-              </div>
-            </button>
-            <span className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-[8px] font-bold uppercase tracking-widest text-white">Escanear</span>
-          </div>
-
-          <button onClick={() => setActiveTab('partidas')} className={`flex flex-col items-center gap-1.5 transition-colors w-16 ${activeTab === 'partidas' ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'}`}>
-            <History size={20} />
-            <span className="text-[8px] font-bold uppercase tracking-widest">Partidas</span>
-          </button>
-        </nav>
-      )}
-
-      {/* Desktop Scan Button (Floating) */}
-      {viewMode === 'user' && (
-        <div className="hidden md:block fixed bottom-8 right-8 z-40">
-          <button
-            onClick={() => setIsScanOpen(true)}
-            className="flex items-center gap-3 px-6 py-4 rounded-full bg-gradient-to-r from-purple-600 to-yellow-500 text-white font-bold shadow-2xl hover:scale-105 transition-transform"
-          >
-            <ScanLine size={24} />
-            ESCANEAR PARTIDA
-          </button>
-        </div>
-      )}
     </div>
   );
 }
-

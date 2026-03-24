@@ -16,6 +16,23 @@ async function startServer() {
   const app = express();
   const PORT = 3005;
 
+  const makeInviteCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
+
+  const getProgressStats = (userId: string, whereSql = "", params: any[] = []) => {
+    return db.prepare(`
+      SELECT
+        COALESCE(SUM(s.kills), 0) as kills,
+        COALESCE(SUM(s.points), 0) as points,
+        COALESCE(SUM(s.damage), 0) as damage,
+        COALESCE(SUM(s.assists), 0) as assists,
+        COUNT(DISTINCT s.match_id) as matches
+      FROM stats s
+      JOIN matches m ON m.match_id = s.match_id
+      WHERE s.user_id = ?
+      ${whereSql}
+    `).get(userId, ...params);
+  };
+
   // Log all requests
   app.use((req, res, next) => {
     console.log(`[REQUEST] ${req.method} ${req.url}`);
@@ -48,16 +65,20 @@ async function startServer() {
   app.post("/api/auth/login", (req, res) => {
     const { google_id, email, gamertag, avatar_url } = req.body;
     try {
+      console.log(`[AUTH] Login attempt for email: ${email}, google_id: ${google_id}`);
       // Buscar por google_id O por email (para atrapar la semilla del admin)
       let user = db.prepare('SELECT * FROM users WHERE google_id = ? OR email = ?').get(google_id, email) as any;
 
       if (!user) {
+        console.log(`[AUTH] User not found, creating new record for ${email}`);
         // Registro nuevo
         const role = email === 'cristhianamador@gmail.com' ? 'SUPER_ADMIN' : 'PLAYER';
         db.prepare('INSERT INTO users (google_id, email, gamertag, role, avatar_url) VALUES (?, ?, ?, ?, ?)')
           .run(google_id, email, gamertag, role, avatar_url);
         user = db.prepare('SELECT * FROM users WHERE google_id = ?').get(google_id);
       } else {
+        console.log(`[AUTH] User found: ${user.gamertag} (Role: ${user.role})`);
+        // ...
         // Si la cuenta existe, pero el google_id es distinto (como el dummy "cristhian-admin-id"), lo actualizamos
         if (user.google_id !== google_id) {
           db.prepare('UPDATE users SET google_id = ?, avatar_url = COALESCE(avatar_url, ?) WHERE email = ?').run(google_id, avatar_url, email);
@@ -172,6 +193,283 @@ async function startServer() {
       res.json({ success: true });
     } catch (e) {
       res.status(500).json({ error: "Failed to accept invitation" });
+    }
+  });
+
+  // API: Crear Liga
+  app.post("/api/leagues", (req, res) => {
+    const { name, admin_id, rules, start_date, end_date, invite_code } = req.body;
+    if (!name) return res.status(400).json({ error: "League name is required" });
+
+    try {
+      const code = (invite_code || makeInviteCode()).toUpperCase();
+      const result = db.prepare(`
+        INSERT INTO competitions (name, type, status, admin_id, invite_code, rules, start_date, end_date, counts_for_league)
+        VALUES (?, 'LIGA', 'OPEN', ?, ?, ?, ?, ?, 1)
+      `).run(name, admin_id || null, code, rules || null, start_date || null, end_date || null);
+
+      res.json({
+        id: result.lastInsertRowid,
+        name,
+        type: 'LIGA',
+        invite_code: code,
+      });
+    } catch (e) {
+      console.error('Error creating league:', e);
+      res.status(500).json({ error: "Failed to create league" });
+    }
+  });
+
+  // API: Listar Ligas
+  app.get("/api/leagues", (req, res) => {
+    try {
+      const rows = db.prepare(`
+        SELECT id, name, status, invite_code, admin_id, start_date, end_date
+        FROM competitions
+        WHERE type = 'LIGA'
+        ORDER BY id DESC
+      `).all();
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to list leagues" });
+    }
+  });
+
+  // API: Crear Torneo (relampago o tradicional)
+  app.post("/api/tournaments", (req, res) => {
+    const {
+      name,
+      type,
+      admin_id,
+      parent_league_id,
+      counts_for_league,
+      rules,
+      start_date,
+      end_date,
+      invite_code,
+    } = req.body;
+
+    if (!name) return res.status(400).json({ error: "Tournament name is required" });
+
+    const normalizedType = type === 'LIGA' ? 'LIGA' : 'TORNEO';
+    const leagueId = parent_league_id ? Number(parent_league_id) : null;
+    const counts = counts_for_league ? 1 : 0;
+
+    try {
+      if (leagueId) {
+        const league = db.prepare("SELECT id FROM competitions WHERE id = ? AND type = 'LIGA'").get(leagueId);
+        if (!league) return res.status(404).json({ error: "Parent league not found" });
+      }
+
+      const code = (invite_code || makeInviteCode()).toUpperCase();
+      const result = db.prepare(`
+        INSERT INTO competitions (
+          name, type, status, admin_id, invite_code, parent_league_id, counts_for_league, rules, start_date, end_date
+        ) VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        name,
+        normalizedType,
+        admin_id || null,
+        code,
+        leagueId,
+        normalizedType === 'TORNEO' ? counts : 1,
+        rules || null,
+        start_date || null,
+        end_date || null
+      );
+
+      res.json({
+        id: result.lastInsertRowid,
+        name,
+        type: normalizedType,
+        parent_league_id: leagueId,
+        counts_for_league: normalizedType === 'TORNEO' ? Boolean(counts) : true,
+        invite_code: code,
+      });
+    } catch (e) {
+      console.error('Error creating tournament:', e);
+      res.status(500).json({ error: "Failed to create tournament" });
+    }
+  });
+
+  // API: Listar Torneos (filtrable por liga)
+  app.get("/api/tournaments", (req, res) => {
+    const leagueId = req.query.league_id ? Number(req.query.league_id) : null;
+    try {
+      const rows = leagueId
+        ? db.prepare(`
+            SELECT id, name, status, admin_id, parent_league_id, counts_for_league, start_date, end_date
+            FROM competitions
+            WHERE type = 'TORNEO' AND parent_league_id = ?
+            ORDER BY id DESC
+          `).all(leagueId)
+        : db.prepare(`
+            SELECT id, name, status, admin_id, parent_league_id, counts_for_league, start_date, end_date
+            FROM competitions
+            WHERE type = 'TORNEO'
+            ORDER BY id DESC
+          `).all();
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to list tournaments" });
+    }
+  });
+
+  // API: Torneos de una liga
+  app.get("/api/leagues/:league_id/tournaments", (req, res) => {
+    const leagueId = Number(req.params.league_id);
+    try {
+      const rows = db.prepare(`
+        SELECT id, name, status, counts_for_league, start_date, end_date
+        FROM competitions
+        WHERE type = 'TORNEO' AND parent_league_id = ?
+        ORDER BY id DESC
+      `).all(leagueId);
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch league tournaments" });
+    }
+  });
+
+  // API: Agregar organizador a torneo
+  app.post("/api/tournaments/:id/organizers", (req, res) => {
+    const competitionId = Number(req.params.id);
+    const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ error: "user_id is required" });
+
+    try {
+      db.prepare(`
+        INSERT OR IGNORE INTO tournament_organizers (competition_id, user_id)
+        VALUES (?, ?)
+      `).run(competitionId, user_id);
+      res.json({ success: true });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to add organizer" });
+    }
+  });
+
+  // API: Listar organizadores de torneo
+  app.get("/api/tournaments/:id/organizers", (req, res) => {
+    const competitionId = Number(req.params.id);
+    try {
+      const rows = db.prepare(`
+        SELECT u.google_id, u.gamertag, u.email, u.avatar_url
+        FROM tournament_organizers t
+        JOIN users u ON t.user_id = u.google_id
+        WHERE t.competition_id = ?
+      `).all(competitionId);
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to list organizers" });
+    }
+  });
+
+  // API: Draft de squads para un torneo/liga
+  app.post("/api/tournaments/draft", (req, res) => {
+    const competitionId = Number(req.body.competition_id);
+    const squadSize = Number(req.body.squad_size) || 4;
+
+    if (!competitionId) return res.status(400).json({ error: "competition_id is required" });
+    if (![2, 3, 4].includes(squadSize)) return res.status(400).json({ error: "squad_size must be 2, 3, or 4" });
+
+    try {
+      const users = db.prepare(`
+        SELECT u.google_id
+        FROM users u
+        WHERE u.google_id NOT IN (
+          SELECT sm.user_id
+          FROM squad_members sm
+          JOIN squads s ON s.id = sm.squad_id
+          WHERE s.competition_id = ? AND sm.status = 'ACTIVE'
+        )
+      `).all(competitionId) as Array<{ google_id: string }>;
+
+      const shuffled = [...users].sort(() => Math.random() - 0.5);
+
+      const draftResult = db.transaction(() => {
+        let squadsCreated = 0;
+        let playersAssigned = 0;
+
+        for (let i = 0; i < shuffled.length; i += squadSize) {
+          const chunk = shuffled.slice(i, i + squadSize);
+          if (chunk.length === 0) continue;
+
+          const leaderId = chunk[0].google_id;
+          const squadName = `Auto Squad ${squadsCreated + 1}`;
+
+          const squad = db.prepare(`
+            INSERT INTO squads (competition_id, name, leader_id, max_members)
+            VALUES (?, ?, ?, ?)
+          `).run(competitionId, squadName, leaderId, squadSize);
+
+          const squadId = squad.lastInsertRowid;
+
+          for (const player of chunk) {
+            db.prepare(`
+              INSERT OR IGNORE INTO squad_members (squad_id, user_id, status)
+              VALUES (?, ?, 'ACTIVE')
+            `).run(squadId, player.google_id);
+            playersAssigned++;
+          }
+
+          squadsCreated++;
+        }
+
+        return { squadsCreated, playersAssigned };
+      });
+
+      const result = draftResult();
+      res.json({ success: true, squads_created: result.squadsCreated, players_assigned: result.playersAssigned });
+    } catch (e) {
+      console.error('Draft error:', e);
+      res.status(500).json({ error: "Failed to execute draft" });
+    }
+  });
+
+  // API: Progreso individual global
+  app.get("/api/progress/overall/:user_id", (req, res) => {
+    const userId = req.params.user_id;
+    try {
+      const progress = getProgressStats(userId);
+      res.json({ scope: 'overall', user_id: userId, ...progress });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch overall progress" });
+    }
+  });
+
+  // API: Progreso individual por liga (incluye torneos que cuentan)
+  app.get("/api/progress/league/:league_id/:user_id", (req, res) => {
+    const leagueId = Number(req.params.league_id);
+    const userId = req.params.user_id;
+    try {
+      const progress = getProgressStats(
+        userId,
+        `
+          AND (
+            m.competition_id = ?
+            OR m.competition_id IN (
+              SELECT id FROM competitions
+              WHERE type = 'TORNEO' AND parent_league_id = ? AND counts_for_league = 1
+            )
+          )
+        `,
+        [leagueId, leagueId]
+      );
+      res.json({ scope: 'league', league_id: leagueId, user_id: userId, ...progress });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch league progress" });
+    }
+  });
+
+  // API: Progreso individual por torneo
+  app.get("/api/progress/tournament/:tournament_id/:user_id", (req, res) => {
+    const tournamentId = Number(req.params.tournament_id);
+    const userId = req.params.user_id;
+    try {
+      const progress = getProgressStats(userId, ' AND m.competition_id = ?', [tournamentId]);
+      res.json({ scope: 'tournament', tournament_id: tournamentId, user_id: userId, ...progress });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch tournament progress" });
     }
   });
 
@@ -344,7 +642,7 @@ async function startServer() {
 
   // API: Guardar Partida Escaneada
   app.post("/api/matches", (req, res) => {
-    const { matchId, position, mode, totalKills, totalScore, totalDamage, members, submitted_by } = req.body;
+    const { matchId, position, mode, totalKills, totalScore, totalDamage, members, submitted_by, competition_id } = req.body;
 
     if (!matchId) {
       return res.status(400).json({ error: "No Match ID provided" });
@@ -359,7 +657,7 @@ async function startServer() {
         db.prepare(`
           INSERT OR IGNORE INTO matches (match_id, competition_id, submitted_by, audit_status)
           VALUES (?, ?, ?, ?)
-        `).run(matchId, 1, userId, 'APPROVED');
+        `).run(matchId, Number(competition_id) || 1, userId, 'APPROVED');
 
         let newlyAddedStats = 0;
 
@@ -513,10 +811,10 @@ async function startServer() {
             COALESCE(SUM(s.points), 0) as points,
             COUNT(DISTINCT s.match_id) as matches
           FROM squad_members sm
-          JOIN users u ON sm.user_phone = u.phone
-          LEFT JOIN stats s ON u.phone = s.user_phone
+          JOIN users u ON sm.user_id = u.google_id
+          LEFT JOIN stats s ON u.google_id = s.user_id
           WHERE sm.squad_id = ? AND sm.status = 'ACTIVE'
-          GROUP BY u.phone
+          GROUP BY u.google_id
           ORDER BY points DESC
         `).all(squad.id);
 
