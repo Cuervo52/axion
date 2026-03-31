@@ -1,17 +1,24 @@
-# AGENTS.md
+# AGENTS.md - Guía para Agentes IA
 
-## Panorama rapido
-- Stack real: un solo proceso `server.ts` corre Express + API + Vite middleware en dev.
-- Puerto real local: `3005` (`npm run dev` ejecuta `tsx server.ts`).
-- Frontend React en `src/` consume rutas relativas `/api/*` (sin proxy Vite en dev).
-- Persistencia: SQLite `warzone.db` via `better-sqlite3`; esquema y migraciones en `src/server/db.ts` (`initDb()`).
+## Panorama Rápido
+- **Stack real**: Un solo proceso `server.ts` corre Express + API + Vite middleware en dev.
+- **Puerto real local**: `3005` (`npm run dev` ejecuta `tsx server.ts`).
+- **Frontend**: React en `src/` consume rutas relativas `/api/*`.
+- **BD**: ⭐ **AGNÓSTICA** - SQLite (`warzone.db`) o PostgreSQL (Contabo) vía `dbAdapter.ts`.
+- **Activación PostgreSQL**: `DB_CORE_PG=1` + `DATABASE_URL` en `.env`.
+- **Capa DB**: `src/server/dbAdapter.ts` abstrae queries entre SQLite y PostgreSQL.
 
-## Arquitectura actual (como funciona hoy)
-- `server.ts` centraliza boot, endpoints, IA (`/api/analyze`), guardado de partidas y leaderboards.
-- `src/server/db.ts` es el unico boundary de schema: crea tablas y migra columnas legacy phone -> google_id.
-- `src/App.tsx` controla sesion (`localStorage: axion_user`), roles y vistas (`user`, `admin-torneo`, `SUPER_ADMIN`).
-- `src/main.tsx` integra Google OAuth con `GOOGLE_CLIENT_ID` hardcodeado.
-- `SuperAdmin` es UI visual/launcher; operacion real de ligas/torneos vive en `AdminTorneo` + API.
+## Arquitectura Actual (Post-Migración)
+- **DB Layer**: `src/server/dbAdapter.ts` es la capa agnóstica - determina SQLite o PostgreSQL según `.env`.
+  - Si `DB_CORE_PG=1` → Usa pool PostgreSQL (Contabo vía `pg` npm)
+  - Si no → Usa SQLite `warzone.db` (via `better-sqlite3`)
+  - **Ventaja**: Queries se escriben UNA SOLA VEZ y funcionan en ambas BDs
+- `server.ts` centraliza boot (inicializa BD según config), endpoints, IA (`/api/analyze`), guardado.
+- `src/server/db.ts` define schema SQLite + migraciones legacy (phone → google_id).
+- `scripts/pg-schema.sql` define schema PostgreSQL (idéntico a SQLite).
+- `src/App.tsx` controla sesión (`localStorage: axion_user`), roles y vistas.
+- `src/main.tsx` integra Google OAuth.
+- `SuperAdmin` launcher; operación real en `AdminTorneo` + API.
 
 ## Modelo de negocio implementado
 - Entidad unica `competitions` con tipos `LIGA` y `TORNEO`.
@@ -36,28 +43,54 @@
 - Progreso: `GET /api/progress/overall/:user_id`, `/league/:league_id/:user_id`, `/tournament/:tournament_id/:user_id`.
 - Resultado/juego: `POST /api/analyze`, `POST /api/matches`, `GET /api/matches`, `GET /api/matches/:match_id/members`.
 
-## Convenciones del proyecto
-- Idioma mixto ES/EN en UI/logs/codigo; mantener consistencia por archivo.
-- SQL inline con `db.prepare(...).run/get/all`; no ORM ni capa repository.
-- Errores API simples: `{ error: string }` y `500` local por endpoint.
-- Se prioriza robustez de payload de imagen: cliente reduce imagen y server acepta JSON hasta `50mb`.
+## Convenciones del Proyecto
+- **Idioma**: Mixto ES/EN; mantener consistencia por archivo.
+- **SQL Agnóstico**: 
+  ```typescript
+  import { getDbAdapter, withTransaction } from './src/server/dbAdapter';
+  const adapter = getDbAdapter();
+  const user = await adapter.get("SELECT * FROM users WHERE google_id = ?", [id]);
+  const users = await adapter.all("SELECT * FROM users", []);
+  await adapter.run("INSERT INTO users (...) VALUES (...)", [...]); 
+  ```
+- **Transacciones** (ambas BDs):
+  ```typescript
+  await withTransaction(async (adapter) => {
+    await adapter.run("INSERT ...", [...]);
+    await adapter.run("INSERT ...", [...]);
+    // Auto-rollback si falla algo
+  });
+  ```
+- **No ORM** ni capa repository - queries inline.
+- **Errores API**: `{ error: string }` + `500` (local) o `400` (validación).
+- **Payloads**: Max 50MB; cliente reduce imagen antes de enviar JSON.
+- **Never** `db.prepare()` directo en backend - usar siempre `adapter`.
 
 ## Workflows de desarrollo y despliegue
-- Instalar: `npm install`.
-- Dev full-stack: `npm run dev`.
-- Verificar tipos/build: `npm run lint`, `npm run build`.
-- Deploy actual: `deploy.sh` (build + `pm2 restart axion-bot` con `tsx server.ts`).
+- **Instalar**: `npm install`.
+- **Dev local (SQLite default)**: `npm run dev`.
+- **Dev con PostgreSQL (Contabo)**: Configurar `DATABASE_URL` y `DB_CORE_PG=1` en `.env`, luego `npm run dev`.
+- **Migración datos**: `npm run migrate:pg` (SQLite → PostgreSQL).
+- **Verificación**: `npm run verify:pg` (valida counts coincidan).
+- **Verificar tipos/build**: `npm run lint`, `npm run build`.
+- **Deploy**: `deploy.sh` (build + `pm2 restart axion-bot` con `tsx server.ts`).
 
 ## Riesgos/deuda real detectada
 - `test-api.js` apunta a `localhost:3000`; backend corre en `3005`.
-- `EscanearPartida.tsx` guarda `POST /api/matches` sin `submitted_by` ni `competition_id`; backend cae a defaults (`admin-google-id`, `competition_id=1`).
-- `GET /api/matches` devuelve `mode='Resurgimiento'` y `position='1st'` fijos; no refleja todos los datos analizados.
-- `SuperAdmin.tsx` muestra metricas mostly estaticas (no conectadas a API real).
-- `src/server/whatsapp.ts` y `src/server/gemini.ts` existen como flujo alterno/experimental no expuesto por rutas Express principales.
+- `EscanearPartida.tsx` guarda `POST /api/matches` sin `submitted_by` ni `competition_id`; backend cae a defaults.
+- `GET /api/matches` devuelve `mode='Resurgimiento'` y `position='1st'` fijos; no refleja datos reales.
+- `SuperAdmin.tsx` muestra métricas mostly estáticas (no conectadas a API real).
+- Sin índices en PostgreSQL en tablas grandes → queries lentas.
+- `whatsapp.ts` experimental no expuesto por rutas Express.
 
 ## Referencias clave para cambios futuros
-- API y reglas de negocio: `server.ts`
-- Esquema/migracion: `src/server/db.ts`
-- Orquestacion UI y roles: `src/App.tsx`
-- Operacion de ligas/torneos: `src/components/AdminTorneo.tsx`
-- Escaneo IA y guardado: `src/components/EscanearPartida.tsx`, `src/services/gemini.ts`
+- **API y reglas**: `server.ts`
+- **Esquema SQLite/migraciones**: `src/server/db.ts`
+- **Esquema PostgreSQL**: `scripts/pg-schema.sql`
+- **Capa agnóstica DB** (⭐ NUEVA): `src/server/dbAdapter.ts`
+- **Orquestación UI**: `src/App.tsx`
+- **Operación ligas/torneos**: `src/components/AdminTorneo.tsx`
+- **Escaneo IA**: `src/components/EscanearPartida.tsx`, `src/services/gemini.ts`
+- **Guía migración**: `MIGRATION_GUIDE.md`, `MIGRATION_SUMMARY.md`
+- **Setup PostgreSQL**: `POSTGRES_SETUP_GUIDE.md`
+- **Scripts**: `setup-pg.sh` (Contabo), `check-pg.sh` (verificación)

@@ -274,6 +274,14 @@ export function initDb() {
       match_id TEXT PRIMARY KEY,
       competition_id INTEGER,
       submitted_by TEXT,
+      mode TEXT,
+      position TEXT,
+      total_score INTEGER DEFAULT 0,
+      total_eliminations INTEGER DEFAULT 0,
+      total_kills INTEGER DEFAULT 0,
+      total_assists INTEGER DEFAULT 0,
+      total_redeploys INTEGER DEFAULT 0,
+      total_damage INTEGER DEFAULT 0,
       audit_status TEXT DEFAULT 'APPROVED' CHECK(audit_status IN ('APPROVED', 'PENDING', 'REJECTED')),
       audit_notes TEXT,
       processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -282,16 +290,118 @@ export function initDb() {
     )
   `);
 
+  try {
+    const matchesInfo = db.prepare("PRAGMA table_info(matches)").all() as any[];
+    const matchesCols = matchesInfo.map(c => c.name);
+
+    if (!matchesCols.includes('mode')) {
+      db.exec("ALTER TABLE matches ADD COLUMN mode TEXT");
+    }
+
+    if (!matchesCols.includes('position')) {
+      db.exec("ALTER TABLE matches ADD COLUMN position TEXT");
+    }
+
+    if (!matchesCols.includes('total_score')) {
+      db.exec("ALTER TABLE matches ADD COLUMN total_score INTEGER DEFAULT 0");
+    }
+
+    if (!matchesCols.includes('total_eliminations')) {
+      db.exec("ALTER TABLE matches ADD COLUMN total_eliminations INTEGER DEFAULT 0");
+    }
+
+    if (!matchesCols.includes('total_kills')) {
+      db.exec("ALTER TABLE matches ADD COLUMN total_kills INTEGER DEFAULT 0");
+    }
+
+    if (!matchesCols.includes('total_assists')) {
+      db.exec("ALTER TABLE matches ADD COLUMN total_assists INTEGER DEFAULT 0");
+    }
+
+    if (!matchesCols.includes('total_redeploys')) {
+      db.exec("ALTER TABLE matches ADD COLUMN total_redeploys INTEGER DEFAULT 0");
+    }
+
+    if (!matchesCols.includes('total_damage')) {
+      db.exec("ALTER TABLE matches ADD COLUMN total_damage INTEGER DEFAULT 0");
+    }
+  } catch (e) {
+    console.error("Error migrando matches:", e);
+  }
+
+  try {
+    const matchesFkList = db.prepare("PRAGMA foreign_key_list(matches)").all() as any[];
+    const referencesLegacyUsers = matchesFkList.some((fk) => fk.table === 'users_old' || (fk.table === 'users' && fk.to === 'phone'));
+
+    if (referencesLegacyUsers) {
+      console.log('Reparando FK de matches -> users(google_id)...');
+      db.exec('ALTER TABLE matches RENAME TO matches_tmp_fix');
+
+      db.exec(`
+        CREATE TABLE matches (
+          match_id TEXT PRIMARY KEY,
+          competition_id INTEGER,
+          submitted_by TEXT,
+          mode TEXT,
+          position TEXT,
+          total_kills INTEGER DEFAULT 0,
+          total_score INTEGER DEFAULT 0,
+          total_damage INTEGER DEFAULT 0,
+          audit_status TEXT DEFAULT 'APPROVED' CHECK(audit_status IN ('APPROVED', 'PENDING', 'REJECTED')),
+          audit_notes TEXT,
+          processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (competition_id) REFERENCES competitions(id),
+          FOREIGN KEY (submitted_by) REFERENCES users(google_id)
+        )
+      `);
+
+      db.exec(`
+        INSERT OR IGNORE INTO matches (
+          match_id,
+          competition_id,
+          submitted_by,
+          mode,
+          position,
+          total_kills,
+          total_score,
+          total_damage,
+          audit_status,
+          audit_notes,
+          processed_at
+        )
+        SELECT
+          match_id,
+          competition_id,
+          NULL,
+          mode,
+          position,
+          COALESCE(total_kills, 0),
+          COALESCE(total_score, 0),
+          COALESCE(total_damage, 0),
+          audit_status,
+          audit_notes,
+          processed_at
+        FROM matches_tmp_fix
+      `);
+
+      db.exec('DROP TABLE matches_tmp_fix');
+    }
+  } catch (e) {
+    console.error("Error reparando matches:", e);
+  }
+
   // Tabla de Estadísticas
   db.exec(`
     CREATE TABLE IF NOT EXISTS stats (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       match_id TEXT,
       user_id TEXT,
+      score INTEGER DEFAULT 0,
+      eliminations INTEGER DEFAULT 0,
       kills INTEGER DEFAULT 0,
-      points INTEGER DEFAULT 0,
-      damage INTEGER DEFAULT 0,
       assists INTEGER DEFAULT 0,
+      redeploys INTEGER DEFAULT 0,
+      damage INTEGER DEFAULT 0,
       placement_points INTEGER DEFAULT 0,
       UNIQUE(match_id, user_id),
       FOREIGN KEY (match_id) REFERENCES matches(match_id),
@@ -313,10 +423,12 @@ export function initDb() {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           match_id TEXT,
           user_id TEXT,
+          score INTEGER DEFAULT 0,
+          eliminations INTEGER DEFAULT 0,
           kills INTEGER DEFAULT 0,
-          points INTEGER DEFAULT 0,
-          damage INTEGER DEFAULT 0,
           assists INTEGER DEFAULT 0,
+          redeploys INTEGER DEFAULT 0,
+          damage INTEGER DEFAULT 0,
           placement_points INTEGER DEFAULT 0,
           UNIQUE(match_id, user_id),
           FOREIGN KEY (match_id) REFERENCES matches(match_id),
@@ -358,6 +470,59 @@ export function initDb() {
     }
   } catch (e) {
     console.error("Error migrando stats:", e);
+  }
+
+  try {
+    const statsFkList = db.prepare("PRAGMA foreign_key_list(stats)").all() as any[];
+    const referencesLegacyMatches = statsFkList.some((fk) => fk.table === 'matches_tmp_fix' || fk.table === 'matches_old');
+
+    if (referencesLegacyMatches) {
+      console.log('Reparando FK de stats -> matches(match_id)...');
+      db.exec('ALTER TABLE stats RENAME TO stats_tmp_fix');
+
+      db.exec(`
+        CREATE TABLE stats (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          match_id TEXT,
+          user_id TEXT,
+          kills INTEGER DEFAULT 0,
+          points INTEGER DEFAULT 0,
+          damage INTEGER DEFAULT 0,
+          assists INTEGER DEFAULT 0,
+          placement_points INTEGER DEFAULT 0,
+          UNIQUE(match_id, user_id),
+          FOREIGN KEY (match_id) REFERENCES matches(match_id),
+          FOREIGN KEY (user_id) REFERENCES users(google_id)
+        )
+      `);
+
+      db.exec(`
+        INSERT OR IGNORE INTO stats (
+          id,
+          match_id,
+          user_id,
+          kills,
+          points,
+          damage,
+          assists,
+          placement_points
+        )
+        SELECT
+          id,
+          match_id,
+          user_id,
+          COALESCE(kills, 0),
+          COALESCE(points, 0),
+          COALESCE(damage, 0),
+          COALESCE(assists, 0),
+          COALESCE(placement_points, 0)
+        FROM stats_tmp_fix
+      `);
+
+      db.exec('DROP TABLE stats_tmp_fix');
+    }
+  } catch (e) {
+    console.error("Error reparando stats:", e);
   }
 
   db.exec(`

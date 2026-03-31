@@ -3,14 +3,13 @@ import { Trophy, User, History, Search, Menu, Settings, Users, Shield, LayoutGri
 import { GoogleLogin } from '@react-oauth/google';
 import { jwtDecode } from 'jwt-decode';
 import { motion, AnimatePresence } from 'motion/react';
-import Equipos from './components/Equipos';
-import Individual from './components/Individual';
-import Partidas from './components/Partidas';
 import AdminTorneo from './components/AdminTorneo';
 import SuperAdmin from './components/SuperAdmin';
 import EscanearPartida from './components/EscanearPartida';
+import PlayerDashboard from './components/PlayerDashboard';
 
 type ViewMode = 'user' | 'admin-torneo';
+type PlayerTab = 'league' | 'career';
 
 interface UserData {
   google_id: string;
@@ -32,13 +31,19 @@ interface CompetitionMembership {
   member_status: 'ACTIVE' | 'LEFT' | 'BANNED';
 }
 
+interface MockTournamentMember {
+  id: string;
+  gamertag: string;
+  avatar_url: string;
+}
+
 export default function App() {
   const [user, setUser] = useState<UserData | null>(() => {
     const saved = localStorage.getItem('axion_user');
     return saved ? JSON.parse(saved) : null;
   });
-  const [activeTab, setActiveTab] = useState<'equipos' | 'individual' | 'partidas'>('equipos');
-  const [forceView, setForceView] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<PlayerTab>('career');
+  const [forceView, setForceView] = useState<string | null>(() => localStorage.getItem('axion_force_view'));
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isScanOpen, setIsScanOpen] = useState(false);
@@ -54,12 +59,14 @@ export default function App() {
   const [isJoiningCompetition, setIsJoiningCompetition] = useState(false);
   const [joinFeedback, setJoinFeedback] = useState<string | null>(null);
   const [handledJoinCode, setHandledJoinCode] = useState<string | null>(null);
+  const [mockTournamentSquad, setMockTournamentSquad] = useState<MockTournamentMember[] | null>(null);
 
   const fallbackCompetitionId = myCompetitions.find((competition) => competition.type === 'TORNEO' && competition.member_status === 'ACTIVE')?.id
     || myCompetitions.find((competition) => competition.type === 'LIGA' && competition.member_status === 'ACTIVE')?.id
     || null;
 
   const activeCompetitionId = squad?.competition_id ? Number(squad.competition_id) : fallbackCompetitionId;
+  const hasMockTournamentSquad = Boolean(mockTournamentSquad?.length);
 
   const fetchMyCompetitions = async (google_id: string) => {
     try {
@@ -260,6 +267,77 @@ export default function App() {
     joinCompetitionByCode(code);
   }, [user, handledJoinCode]);
 
+  useEffect(() => {
+    if (forceView) {
+      localStorage.setItem('axion_force_view', forceView);
+    } else {
+      localStorage.removeItem('axion_force_view');
+    }
+  }, [forceView]);
+
+  useEffect(() => {
+    if (!user) {
+      setMockTournamentSquad(null);
+      return;
+    }
+
+    const syncMockTournamentSquad = () => {
+      try {
+        const raw = localStorage.getItem('axion_mock_tournament_teams');
+        if (!raw) {
+          setMockTournamentSquad(null);
+          return;
+        }
+        const teams = JSON.parse(raw) as MockTournamentMember[][];
+        const team = teams.find((group) =>
+          group.some((member) => member.gamertag.toLowerCase() === user.gamertag.toLowerCase()),
+        ) || null;
+        setMockTournamentSquad(team);
+      } catch {
+        setMockTournamentSquad(null);
+      }
+    };
+
+    syncMockTournamentSquad();
+    window.addEventListener('storage', syncMockTournamentSquad);
+    window.addEventListener('axion-mock-tournament-updated', syncMockTournamentSquad);
+    return () => {
+      window.removeEventListener('storage', syncMockTournamentSquad);
+      window.removeEventListener('axion-mock-tournament-updated', syncMockTournamentSquad);
+    };
+  }, [user]);
+
+  const activeTournament = myCompetitions.find((competition) => competition.type === 'TORNEO' && competition.member_status === 'ACTIVE') || null;
+  const activeLeague = myCompetitions.find((competition) => competition.type === 'LIGA' && competition.member_status === 'ACTIVE') || null;
+  const hasRealTournamentSquad = Boolean(activeTournament && squad && Number(squad.competition_id) === activeTournament.id);
+  const tournamentSquadMembers = hasMockTournamentSquad
+    ? mockTournamentSquad
+    : hasRealTournamentSquad
+      ? (squad?.members || null)
+      : null;
+  const playerState = tournamentSquadMembers
+    ? 'tournament_sorted'
+    : activeTournament
+      ? 'tournament_lobby'
+      : activeLeague
+        ? 'league_member'
+        : 'idle';
+  const playerStateTitle = playerState === 'tournament_sorted'
+    ? (activeTournament?.name || 'Torneo en curso')
+    : playerState === 'tournament_lobby'
+      ? (activeTournament?.name || 'Lobby del torneo')
+      : playerState === 'league_member'
+        ? (activeLeague?.name || 'Liga activa')
+        : 'Sin torneo activo';
+  const playerStateHint = playerState === 'tournament_sorted'
+    ? 'Tu squad ya esta armado. Lo importante es jugar y subir resultados.'
+    : playerState === 'tournament_lobby'
+      ? 'Ya entraste al torneo. Falta que cierren lobby y hagan el sorteo.'
+      : playerState === 'league_member'
+        ? 'Sigues dentro de tu liga. Cuando abran torneo, aqui mismo avanzas.'
+        : 'Puedes consultar tu historial o entrar con un codigo de invitacion.';
+  const showJoinInput = playerState === 'idle' || playerState === 'league_member';
+
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve) => {
       const reader = new FileReader();
@@ -389,27 +467,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Tabs Superiores (Only in User Mode) */}
-            {viewMode === 'user' && (
-              <div className="flex gap-6 overflow-x-auto no-scrollbar border-b border-white/5 w-full max-w-7xl mx-auto">
-                {['equipos', 'individual', 'partidas'].map((tab) => (
-                  <button
-                    key={tab}
-                    onClick={() => setActiveTab(tab as any)}
-                    className={`pb-3 text-xs font-bold uppercase tracking-widest transition-all relative ${activeTab === tab ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'
-                      }`}
-                  >
-                    {tab}
-                    {activeTab === tab && (
-                      <motion.div
-                        layoutId="activeTab"
-                        className="absolute bottom-0 left-0 right-0 h-[2px] bg-gradient-to-r from-purple-500 to-yellow-500 rounded-t-full"
-                      />
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
           </header>
 
           {/* Sidebar Menu */}
@@ -442,30 +499,43 @@ export default function App() {
                   <div className="space-y-6 flex-1">
                     <div className="space-y-2">
                       <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 px-2">Navegación</h3>
-                      <button onClick={() => { setActiveTab('equipos'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                        <Users size={18} className="text-purple-500" /> Equipos
+                      <button onClick={() => { setForceView('user'); setActiveTab('league'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                        <LayoutGrid size={18} className="text-cyan-400" /> Liga
                       </button>
-                      <button onClick={() => { setActiveTab('individual'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                        <User size={18} className="text-purple-500" /> Individual
-                      </button>
-                      <button onClick={() => { setActiveTab('partidas'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                        <History size={18} className="text-purple-500" /> Partidas
+                      <button onClick={() => { setForceView('user'); setActiveTab('career'); setIsMenuOpen(false); }} className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                        <User size={18} className="text-purple-500" /> Carrera
                       </button>
                     </div>
 
                     <div className="space-y-2">
-                      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 px-2">Torneos</h3>
-                      <button className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                        <Trophy size={18} className="text-yellow-500" /> Mis Torneos
+                      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 px-2">Vistas</h3>
+                      <button
+                        onClick={() => { setForceView('admin-torneo'); setIsMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                      >
+                        <Trophy size={18} className="text-yellow-500" /> Admin torneo
                       </button>
-                      <button className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
-                        <Search size={18} className="text-slate-500" /> Buscar Torneo
+                      <button
+                        onClick={() => { setForceView('user'); setActiveTab('league'); setIsMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                      >
+                        <Users size={18} className="text-blue-400" /> Vista player
+                      </button>
+                      <button
+                        onClick={() => {
+                          localStorage.removeItem('axion_mock_tournament_teams');
+                          window.dispatchEvent(new Event('axion-mock-tournament-updated'));
+                          setIsMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                      >
+                        <X size={18} className="text-slate-500" /> Limpiar sorteo
                       </button>
                     </div>
                   </div>
 
                   <div className="pt-6 border-t border-white/10">
-                    <button onClick={() => { setUser(null); localStorage.removeItem('axion_user'); }} className="w-full flex items-center gap-3 px-3 py-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors">
+                    <button onClick={() => { setUser(null); localStorage.removeItem('axion_user'); localStorage.removeItem('axion_force_view'); }} className="w-full flex items-center gap-3 px-3 py-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors">
                       <LogOut size={18} /> Cerrar Sesión
                     </button>
                   </div>
@@ -476,233 +546,159 @@ export default function App() {
 
           {/* Main Content Area */}
           <main className="w-full max-w-7xl mx-auto px-4 mt-4 space-y-6">
-
-            <section className="bg-[#0B0E14] border border-white/5 rounded-3xl p-6 space-y-4">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div>
-                  <h2 className="text-lg font-black text-white uppercase tracking-tight">Mis ligas y torneos</h2>
-                  <p className="text-xs text-slate-400">Entra por codigo/link o crea desde panel admin.</p>
-                </div>
-                {(user.role === 'ADMIN' || user.role === 'SUPER_ADMIN') && (
-                  <button
-                    onClick={() => setForceView('admin-torneo')}
-                    className="px-4 py-2 bg-purple-600 rounded-xl text-xs font-bold text-white hover:bg-purple-500 transition-colors"
-                  >
-                    Ir a Admin Torneo
-                  </button>
-                )}
-              </div>
-
-              <div className="flex gap-2 flex-wrap">
-                <input
-                  type="text"
-                  value={joinCode}
-                  onChange={(e) => setJoinCode(e.target.value)}
-                  placeholder="Pega codigo de invitacion (ej. A1B2C3)"
-                  className="flex-1 min-w-[220px] bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white"
-                />
-                <button
-                  onClick={() => joinCompetitionByCode(joinCode)}
-                  disabled={!joinCode.trim() || isJoiningCompetition}
-                  className="px-4 py-2 bg-emerald-600 rounded-xl text-xs font-bold text-white disabled:opacity-50"
-                >
-                  {isJoiningCompetition ? 'Uniendo...' : 'Unirme'}
-                </button>
-              </div>
-
-              {joinFeedback && <div className="text-xs text-purple-300">{joinFeedback}</div>}
-
-              {myCompetitions.length === 0 ? (
-                <div className="text-sm text-slate-400 bg-white/5 border border-white/10 rounded-2xl p-4">
-                  Aun no perteneces a ninguna liga/torneo. Puedes unirte con codigo o abrir tus estadisticas mientras arrancan.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {myCompetitions.slice(0, 8).map((item) => (
-                    <div key={`${item.type}-${item.id}`} className="bg-white/5 border border-white/10 rounded-2xl p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase">{item.type}</span>
-                        <span className="text-[10px] text-purple-300 font-bold">{item.role}</span>
-                      </div>
-                      <div className="text-sm font-bold text-white mt-1">{item.name}</div>
-                      <div className="text-[11px] text-slate-400 mt-1">Status: {item.status}</div>
-                      {item.invite_code && (
-                        <div className="text-[11px] text-slate-500 mt-1 font-mono">Codigo: {item.invite_code}</div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {/* Invitations Alert */}
-            <AnimatePresence>
-              {invitations.length > 0 && invitations.map((inv) => (
-                <motion.div
-                  key={inv.squad_id}
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  className="bg-purple-600/20 border border-purple-500/30 rounded-2xl p-4 flex items-center justify-between overflow-hidden"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center">
-                      <Bell className="text-purple-400" size={20} />
-                    </div>
-                    <div>
-                      <p className="text-sm font-bold text-white">¡Invitación a Squad!</p>
-                      <p className="text-[12px] text-purple-300"><b>{inv.leader_name}</b> te invitó a unirte a <b>{inv.squad_name}</b></p>
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleAcceptInvite(inv.squad_id)}
-                      className="px-4 py-2 bg-purple-600 rounded-xl text-[12px] font-bold hover:bg-purple-500 transition-all shadow-lg"
-                    >
-                      Aceptar
-                    </button>
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
-
-            {/* Squad Area */}
-            {squad ? (
-              <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-purple-600/20 flex items-center justify-center text-purple-400">
-                      <Users size={20} />
-                    </div>
-                    <div>
-                      <h2 className="text-lg font-black text-white uppercase tracking-tight">{squad.name}</h2>
-                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Tu Squad Actual</p>
-                    </div>
-                  </div>
-                  <span className="px-3 py-1 bg-green-500/10 text-green-400 text-[10px] font-bold rounded-full uppercase border border-green-500/20">Activo</span>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                  {squad.members.map((member: any, i: number) => (
-                    <div key={i} className="flex items-center gap-3 p-3 bg-white/5 rounded-2xl border border-white/5">
-                      <div className="w-10 h-10 rounded-xl bg-slate-800 flex-shrink-0 relative overflow-hidden">
-                        {member.avatar_url ? (
-                          <img src={member.avatar_url} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full bg-gradient-to-br from-slate-700 to-slate-800" />
-                        )}
-                        {member.status === 'PENDING' && (
-                          <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-                            <History size={16} className="text-slate-400 animate-pulse" />
-                          </div>
-                        )}
-                      </div>
-                      <div className="min-w-0">
-                        <p className={`text-xs font-bold truncate ${member.status === 'PENDING' ? 'text-slate-500 italic' : 'text-slate-200'}`}>
-                          {member.gamertag}
-                        </p>
-                        <p className="text-[10px] text-slate-500">{member.status === 'PENDING' ? 'Invitado...' : 'Miembro'}</p>
-                      </div>
-                    </div>
-                  ))}
-
-                  {/* Invitation Search (Only for Leader) */}
-                  {squad.members.length < (squad.max_members || 4) && squad.leader_id === user.google_id && (
-                    <div className="relative col-span-2 mt-2">
-                      <div className="flex items-center gap-2 bg-white/5 border border-dashed border-white/10 rounded-2xl p-2 px-3">
-                        <Search size={14} className="text-slate-500" />
-                        <input
-                          type="text"
-                          placeholder="Invitar jugador por Gamertag..."
-                          value={searchQuery}
-                          onChange={(e) => setSearchQuery(e.target.value)}
-                          className="bg-transparent border-none text-[12px] text-white focus:outline-none w-full"
-                        />
-                      </div>
-
-                      {/* Search Results Dropdown */}
-                      <AnimatePresence>
-                        {searchResults.length > 0 && (
-                          <motion.div
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            className="absolute top-full left-0 right-0 mt-2 bg-[#161B22] border border-white/10 rounded-2xl shadow-2xl z-20 overflow-hidden"
-                          >
-                            {searchResults.map((res) => (
-                              <button
-                                key={res.google_id}
-                                onClick={() => inviteUser(res.google_id)}
-                                className="w-full p-3 flex items-center gap-3 hover:bg-white/5 transition-all border-b border-white/5 last:border-0"
-                              >
-                                <div className="w-8 h-8 rounded-lg bg-slate-800 overflow-hidden">
-                                  {res.avatar_url && <img src={res.avatar_url} className="w-full h-full object-cover" />}
-                                </div>
-                                <span className="text-xs font-bold text-white">{res.gamertag}</span>
-                                <span className="ml-auto text-[10px] text-purple-400 font-bold uppercase">Invitar</span>
-                              </button>
-                            ))}
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : (
-              /* No Squad State */
-              <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-8 flex flex-col items-center text-center space-y-4">
-                <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center text-slate-600">
-                  <Users size={32} />
-                </div>
-                <div className="space-y-1">
-                  <h2 className="text-xl font-black text-white uppercase tracking-tight">No tienes Squad</h2>
-                  <p className="text-sm text-slate-400 max-w-xs mx-auto">Únete a uno o crea el tuyo para empezar a sumar puntos en equipo.</p>
-                </div>
-
-                {isCreatingSquad ? (
-                  <div className="w-full max-w-xs flex gap-2">
-                    <input
-                      id="new-squad-name"
-                      type="text"
-                      autoFocus
-                      placeholder="Nombre de tu Squad"
-                      className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
-                    />
-                    <button
-                      onClick={() => {
-                        const input = document.getElementById('new-squad-name') as HTMLInputElement;
-                        createSquad(input.value);
-                      }}
-                      className="px-4 py-2 bg-purple-600 rounded-xl text-xs font-bold text-white hover:bg-purple-500 transition-all"
-                    >
-                      Crear
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => setIsCreatingSquad(true)}
-                    className="px-8 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-sm font-bold text-white transition-all flex items-center gap-2"
-                  >
-                    <Plus size={18} className="text-purple-400" /> Crear mi propio Squad
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Dashboards Components */}
-            {viewMode === 'user' && (
-              <>
-                {activeTab === 'equipos' && <Equipos />}
-                {activeTab === 'individual' && <Individual />}
-                {activeTab === 'partidas' && <Partidas />}
-              </>
-            )}
-
-            {viewMode === 'admin-torneo' && (
+            {viewMode === 'admin-torneo' ? (
               <AdminTorneo
                 currentUser={user}
                 myCompetitions={myCompetitions}
               />
+            ) : (
+              <>
+                {(showJoinInput || user.role === 'ADMIN' || user.role === 'SUPER_ADMIN') && (
+                  <section className="px-1 pt-1 pb-2 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      {showJoinInput ? (
+                        <div className="rounded-[1.4rem] border border-white/8 bg-white/[0.03] p-2 flex-1">
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={joinCode}
+                              onChange={(e) => setJoinCode(e.target.value)}
+                              placeholder="Entrar con codigo"
+                              className="flex-1 bg-transparent rounded-[1.2rem] px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:outline-none"
+                            />
+                            <button
+                              onClick={() => joinCompetitionByCode(joinCode)}
+                              disabled={!joinCode.trim() || isJoiningCompetition}
+                              className="px-5 py-3 rounded-[1.2rem] bg-emerald-600 text-sm font-black text-white disabled:opacity-50 whitespace-nowrap"
+                            >
+                              {isJoiningCompetition ? 'Entrando...' : 'Entrar'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : <div />}
+
+                      {(user.role === 'ADMIN' || user.role === 'SUPER_ADMIN') && (
+                        <button
+                          onClick={() => setForceView('admin-torneo')}
+                          className="px-3 py-2 rounded-full border border-white/10 bg-white/5 text-[11px] font-bold text-white shrink-0"
+                        >
+                          Admin
+                        </button>
+                      )}
+                    </div>
+
+                    {joinFeedback && <div className="text-xs text-emerald-300">{joinFeedback}</div>}
+                  </section>
+                )}
+
+                <AnimatePresence>
+                  {invitations.length > 0 && invitations.map((inv) => (
+                    <motion.div
+                      key={inv.squad_id}
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="bg-purple-600/20 border border-purple-500/30 rounded-2xl p-4 flex items-center justify-between overflow-hidden"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center">
+                          <Bell className="text-purple-400" size={20} />
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold text-white">¡Invitación a Squad!</p>
+                          <p className="text-[12px] text-purple-300"><b>{inv.leader_name}</b> te invitó a unirte a <b>{inv.squad_name}</b></p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleAcceptInvite(inv.squad_id)}
+                          className="px-4 py-2 bg-purple-600 rounded-xl text-[12px] font-bold hover:bg-purple-500 transition-all shadow-lg"
+                        >
+                          Aceptar
+                        </button>
+                      </div>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+
+                {playerState === 'idle' && squad ? (
+                  <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-6 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-purple-600/20 flex items-center justify-center text-purple-400">
+                          <Users size={20} />
+                        </div>
+                        <div>
+                          <h2 className="text-lg font-black text-white uppercase tracking-tight">{squad.name}</h2>
+                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Squad actual legacy</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      {squad.members.map((member: any, i: number) => (
+                        <div key={`${member.id || member.gamertag}-${i}`} className="flex items-center gap-3 p-3 bg-white/5 rounded-2xl border border-white/5">
+                          <div className="w-10 h-10 rounded-xl bg-slate-800 flex-shrink-0 relative overflow-hidden">
+                            {member.avatar_url ? (
+                              <img src={member.avatar_url} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full bg-gradient-to-br from-slate-700 to-slate-800" />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold truncate text-slate-200">{member.gamertag}</p>
+                            <p className="text-[10px] text-slate-500">Miembro</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : playerState === 'idle' && myCompetitions.some((item) => item.type === 'TORNEO') ? (
+                  <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-8 flex flex-col items-center text-center space-y-4">
+                    <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center text-slate-600">
+                      <Users size={32} />
+                    </div>
+                    <div className="space-y-1">
+                      <h2 className="text-xl font-black text-white uppercase tracking-tight">Aún no tienes Squad</h2>
+                      <p className="text-sm text-slate-400 max-w-xs mx-auto">Créalo sólo si ya estás dentro de un torneo y necesitas equipo.</p>
+                    </div>
+
+                    {isCreatingSquad ? (
+                      <div className="w-full max-w-xs flex gap-2">
+                        <input
+                          id="new-squad-name"
+                          type="text"
+                          autoFocus
+                          placeholder="Nombre de tu Squad"
+                          className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+                        />
+                        <button
+                          onClick={() => {
+                            const input = document.getElementById('new-squad-name') as HTMLInputElement;
+                            createSquad(input.value);
+                          }}
+                          className="px-4 py-2 bg-purple-600 rounded-xl text-xs font-bold text-white hover:bg-purple-500 transition-all"
+                        >
+                          Crear
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setIsCreatingSquad(true)}
+                        className="px-8 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-sm font-bold text-white transition-all flex items-center gap-2"
+                      >
+                        <Plus size={18} className="text-purple-400" /> Crear mi propio Squad
+                      </button>
+                    )}
+                  </div>
+                ) : null}
+
+                <PlayerDashboard
+                  userId={user.google_id}
+                  activeTab={activeTab}
+                  onTabChange={setActiveTab}
+                />
+              </>
             )}
           </main>
 
@@ -723,9 +719,9 @@ export default function App() {
           {/* Bottom Nav (Only in User Mode) */}
           {viewMode === 'user' && (
             <nav className="fixed bottom-0 left-0 right-0 bg-[#0B0E14]/90 backdrop-blur-xl border-t border-white/5 px-6 py-2 flex justify-between items-end z-40 w-full max-w-7xl mx-auto rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.5)] pb-6 md:hidden">
-              <button onClick={() => setActiveTab('equipos')} className={`flex flex-col items-center gap-1.5 transition-colors w-16 ${activeTab === 'equipos' ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'}`}>
-                <Users size={20} />
-                <span className="text-[8px] font-bold uppercase tracking-widest">Equipos</span>
+              <button onClick={() => setActiveTab('league')} className={`flex flex-col items-center gap-1.5 transition-colors w-16 ${activeTab === 'league' ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'}`}>
+                <LayoutGrid size={20} />
+                <span className="text-[8px] font-bold uppercase tracking-widest">Ligas</span>
               </button>
 
               {/* Central Scan Button */}
@@ -741,9 +737,9 @@ export default function App() {
                 <span className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-[8px] font-bold uppercase tracking-widest text-white">Escanear</span>
               </div>
 
-              <button onClick={() => setActiveTab('partidas')} className={`flex flex-col items-center gap-1.5 transition-colors w-16 ${activeTab === 'partidas' ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'}`}>
-                <History size={20} />
-                <span className="text-[8px] font-bold uppercase tracking-widest">Partidas</span>
+              <button onClick={() => setActiveTab('career')} className={`flex flex-col items-center gap-1.5 transition-colors w-16 ${activeTab === 'career' ? 'text-purple-400' : 'text-slate-500 hover:text-slate-300'}`}>
+                <User size={20} />
+                <span className="text-[8px] font-bold uppercase tracking-widest">Carrera</span>
               </button>
             </nav>
           )}

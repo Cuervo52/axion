@@ -6,6 +6,7 @@ import { handleWhatsAppMessage } from "./src/server/whatsapp";
 import db from "./src/server/db";
 import { initPgSchema, isPgCoreEnabled, pgQuery } from "./src/server/pg";
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import { getDbAdapter, initPgPool, isPgEnabled, convertSqlParams } from "./src/server/dbAdapter";
 
 // Inicializar cliente de Gemini (Server-side)
 // Limpiamos la clave de posibles comillas si vienen del .env
@@ -16,6 +17,15 @@ const genAI = new GoogleGenerativeAI(cleanKey);
 async function startServer() {
   const app = express();
   const PORT = 3005;
+
+  // Inicializar BD
+  if (isPgEnabled()) {
+    console.log('🔵 Usando PostgreSQL como core');
+    await initPgPool();
+  } else {
+    console.log('🟡 Usando SQLite como core');
+    initDb();
+  }
 
   const makeInviteCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
 
@@ -37,16 +47,395 @@ async function startServer() {
   const getProgressStats = (userId: string, whereSql = "", params: any[] = []) => {
     return db.prepare(`
       SELECT
+        COALESCE(SUM(s.score), 0) as score,
+        COALESCE(SUM(s.eliminations), 0) as eliminations,
         COALESCE(SUM(s.kills), 0) as kills,
-        COALESCE(SUM(s.points), 0) as points,
-        COALESCE(SUM(s.damage), 0) as damage,
         COALESCE(SUM(s.assists), 0) as assists,
+        COALESCE(SUM(s.redeploys), 0) as redeploys,
+        COALESCE(SUM(s.damage), 0) as damage,
         COUNT(DISTINCT s.match_id) as matches
       FROM stats s
       JOIN matches m ON m.match_id = s.match_id
       WHERE s.user_id = ?
       ${whereSql}
     `).get(userId, ...params);
+  };
+
+  const getCompetitionContext = (userId: string) => {
+    const competitions = db.prepare(`
+      SELECT
+        c.id,
+        c.name,
+        c.type,
+        c.status,
+        c.parent_league_id,
+        c.invite_code,
+        cm.role,
+        cm.status as member_status,
+        cm.joined_at
+      FROM competition_members cm
+      JOIN competitions c ON c.id = cm.competition_id
+      WHERE cm.user_id = ?
+        AND cm.status = 'ACTIVE'
+      ORDER BY
+        CASE WHEN c.type = 'TORNEO' THEN 0 ELSE 1 END,
+        cm.joined_at DESC
+    `).all(userId) as any[];
+
+    const activeTournament = competitions.find((competition) => competition.type === 'TORNEO') || null;
+    const activeLeague = competitions.find((competition) => competition.type === 'LIGA') || null;
+
+    return { competitions, activeTournament, activeLeague };
+  };
+
+  const buildGroupedMatchSeries = (competitionId: number, mySquadId: number | null) => {
+    const rows = db.prepare(`
+      SELECT
+        m.match_id,
+        m.processed_at as date,
+        COALESCE(m.mode, 'N/A') as mode,
+        COALESCE(m.position, 'N/A') as position,
+        sq.id as squad_id,
+        sq.name as squad_name,
+        COALESCE(SUM(s.kills), 0) as kills,
+        COALESCE(SUM(s.points), 0) as points,
+        COALESCE(SUM(s.damage), 0) as damage,
+        COALESCE(SUM(s.assists), 0) as assists,
+        COUNT(DISTINCT s.user_id) as members_count
+      FROM matches m
+      JOIN stats s ON s.match_id = m.match_id
+      JOIN squad_members sm ON sm.user_id = s.user_id AND sm.status = 'ACTIVE'
+      JOIN squads sq ON sq.id = sm.squad_id AND sq.competition_id = m.competition_id
+      WHERE m.competition_id = ?
+      GROUP BY m.match_id, m.processed_at, m.mode, m.position, sq.id, sq.name
+      ORDER BY m.processed_at DESC, points DESC, kills DESC
+      LIMIT 160
+    `).all(competitionId) as any[];
+
+    const grouped = new Map<string, any>();
+    for (const row of rows) {
+      if (!grouped.has(row.match_id)) {
+        grouped.set(row.match_id, {
+          match_id: row.match_id,
+          date: row.date,
+          mode: row.mode,
+          position: row.position,
+          squads: [],
+        });
+      }
+      grouped.get(row.match_id).squads.push({
+        squad_id: Number(row.squad_id),
+        squad_name: row.squad_name,
+        kills: Number(row.kills || 0),
+        points: Number(row.points || 0),
+        damage: Number(row.damage || 0),
+        assists: Number(row.assists || 0),
+        members_count: Number(row.members_count || 0),
+        is_my_squad: mySquadId ? Number(row.squad_id) === mySquadId : false,
+      });
+    }
+
+    return Array.from(grouped.values())
+      .map((match) => ({
+        ...match,
+        squads: match.squads
+          .sort((a: any, b: any) => (b.points - a.points) || (b.kills - a.kills) || (b.damage - a.damage))
+          .map((squad: any, index: number) => ({ ...squad, placement: index + 1 })),
+      }))
+      .slice(0, 12);
+  };
+
+  const listTournamentSquads = (competitionId: number) => {
+    const squads = db.prepare(`
+      SELECT
+        sq.id,
+        sq.name,
+        sq.max_members,
+        COUNT(DISTINCT CASE WHEN sm.status = 'ACTIVE' THEN sm.user_id END) as members_count,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.points ELSE 0 END), 0) as points,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.kills ELSE 0 END), 0) as kills,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.damage ELSE 0 END), 0) as damage,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.assists ELSE 0 END), 0) as assists,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.placement_points ELSE 0 END), 0) as placement_points,
+        COUNT(DISTINCT CASE WHEN m.competition_id = ? THEN s.match_id END) as matches
+      FROM squads sq
+      LEFT JOIN squad_members sm ON sm.squad_id = sq.id AND sm.status = 'ACTIVE'
+      LEFT JOIN stats s ON s.user_id = sm.user_id
+      LEFT JOIN matches m ON m.match_id = s.match_id
+      WHERE sq.competition_id = ?
+      GROUP BY sq.id
+      ORDER BY points DESC, kills DESC, damage DESC
+    `).all(
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+    ) as any[];
+
+    return squads.map((squad) => {
+      const members = db.prepare(`
+        SELECT
+          u.google_id,
+          u.gamertag,
+          u.avatar_url,
+          COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.points ELSE 0 END), 0) as points,
+          COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.kills ELSE 0 END), 0) as kills,
+          COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.damage ELSE 0 END), 0) as damage,
+          COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.assists ELSE 0 END), 0) as assists,
+          COUNT(DISTINCT CASE WHEN m.competition_id = ? THEN s.match_id END) as matches
+        FROM squad_members sm
+        JOIN users u ON u.google_id = sm.user_id
+        LEFT JOIN stats s ON s.user_id = u.google_id
+        LEFT JOIN matches m ON m.match_id = s.match_id
+        WHERE sm.squad_id = ?
+          AND sm.status = 'ACTIVE'
+        GROUP BY u.google_id
+        ORDER BY points DESC, kills DESC, damage DESC
+      `).all(
+        competitionId,
+        competitionId,
+        competitionId,
+        competitionId,
+        competitionId,
+        squad.id,
+      );
+
+      return { ...squad, members };
+    });
+  };
+
+  const listTournamentPlayers = (competitionId: number) => {
+    return db.prepare(`
+      SELECT
+        u.google_id,
+        u.gamertag,
+        u.avatar_url,
+        COALESCE(MAX(sq.name), 'Sin squad') as squad_name,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.points ELSE 0 END), 0) as points,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.kills ELSE 0 END), 0) as kills,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.damage ELSE 0 END), 0) as damage,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.assists ELSE 0 END), 0) as assists,
+        COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.placement_points ELSE 0 END), 0) as placement_points,
+        COUNT(DISTINCT CASE WHEN m.competition_id = ? THEN s.match_id END) as matches
+      FROM competition_members cm
+      JOIN users u ON u.google_id = cm.user_id
+      LEFT JOIN squad_members sm ON sm.user_id = u.google_id AND sm.status = 'ACTIVE'
+      LEFT JOIN squads sq ON sq.id = sm.squad_id AND sq.competition_id = ?
+      LEFT JOIN stats s ON s.user_id = u.google_id
+      LEFT JOIN matches m ON m.match_id = s.match_id
+      WHERE cm.competition_id = ?
+        AND cm.status = 'ACTIVE'
+      GROUP BY u.google_id
+      ORDER BY points DESC, kills DESC, damage DESC
+    `).all(
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+      competitionId,
+    ) as any[];
+  };
+
+  const listLeaguePlayers = (leagueId: number) => {
+    return db.prepare(`
+      SELECT
+        u.google_id,
+        u.gamertag,
+        u.avatar_url,
+        COALESCE(SUM(
+          CASE
+            WHEN m.competition_id = ?
+              OR m.competition_id IN (
+                SELECT id FROM competitions
+                WHERE type = 'TORNEO' AND parent_league_id = ? AND counts_for_league = 1
+              )
+            THEN s.points ELSE 0
+          END
+        ), 0) as points,
+        COALESCE(SUM(
+          CASE
+            WHEN m.competition_id = ?
+              OR m.competition_id IN (
+                SELECT id FROM competitions
+                WHERE type = 'TORNEO' AND parent_league_id = ? AND counts_for_league = 1
+              )
+            THEN s.kills ELSE 0
+          END
+        ), 0) as kills,
+        COALESCE(SUM(
+          CASE
+            WHEN m.competition_id = ?
+              OR m.competition_id IN (
+                SELECT id FROM competitions
+                WHERE type = 'TORNEO' AND parent_league_id = ? AND counts_for_league = 1
+              )
+            THEN s.damage ELSE 0
+          END
+        ), 0) as damage,
+        COALESCE(SUM(
+          CASE
+            WHEN m.competition_id = ?
+              OR m.competition_id IN (
+                SELECT id FROM competitions
+                WHERE type = 'TORNEO' AND parent_league_id = ? AND counts_for_league = 1
+              )
+            THEN s.assists ELSE 0
+          END
+        ), 0) as assists,
+        COUNT(DISTINCT CASE
+          WHEN m.competition_id = ?
+            OR m.competition_id IN (
+              SELECT id FROM competitions
+              WHERE type = 'TORNEO' AND parent_league_id = ? AND counts_for_league = 1
+            )
+          THEN s.match_id
+        END) as matches
+      FROM competition_members cm
+      JOIN users u ON u.google_id = cm.user_id
+      LEFT JOIN stats s ON s.user_id = u.google_id
+      LEFT JOIN matches m ON m.match_id = s.match_id
+      WHERE cm.competition_id = ?
+        AND cm.status = 'ACTIVE'
+      GROUP BY u.google_id
+      ORDER BY points DESC, kills DESC, damage DESC
+    `).all(
+      leagueId, leagueId,
+      leagueId, leagueId,
+      leagueId, leagueId,
+      leagueId, leagueId,
+      leagueId, leagueId,
+      leagueId,
+    ) as any[];
+  };
+
+  const resolveTournamentForLeague = (leagueId: number, userId: string) => {
+    return db.prepare(`
+      SELECT
+        c.id,
+        c.name,
+        c.status,
+        c.parent_league_id,
+        c.start_date,
+        c.end_date,
+        c.counts_for_league
+      FROM competitions c
+      LEFT JOIN competition_members cm
+        ON cm.competition_id = c.id
+        AND cm.user_id = ?
+        AND cm.status = 'ACTIVE'
+      WHERE c.type = 'TORNEO'
+        AND c.parent_league_id = ?
+      ORDER BY
+        CASE WHEN c.status IN ('ACTIVE', 'OPEN') THEN 0 ELSE 1 END,
+        CASE WHEN cm.user_id IS NOT NULL THEN 0 ELSE 1 END,
+        COALESCE(c.start_date, c.end_date, c.id) DESC,
+        c.id DESC
+      LIMIT 1
+    `).get(userId, leagueId) as any;
+  };
+
+  const listPastTournamentsForLeague = (leagueId: number, currentTournamentId?: number | null) => {
+    return db.prepare(`
+      SELECT
+        id,
+        name,
+        status,
+        parent_league_id,
+        start_date,
+        end_date,
+        counts_for_league
+      FROM competitions
+      WHERE type = 'TORNEO'
+        AND parent_league_id = ?
+        AND (? IS NULL OR id <> ?)
+      ORDER BY COALESCE(start_date, end_date, id) DESC, id DESC
+    `).all(leagueId, currentTournamentId || null, currentTournamentId || null) as any[];
+  };
+
+  const buildTournamentSnapshot = (competitionId: number, userId: string) => {
+    const competition = db.prepare(`
+      SELECT
+        id,
+        name,
+        status,
+        parent_league_id,
+        start_date,
+        end_date,
+        counts_for_league
+      FROM competitions
+      WHERE id = ?
+        AND type = 'TORNEO'
+      LIMIT 1
+    `).get(competitionId) as any;
+
+    if (!competition) return null;
+
+    const myTournamentSquad = db.prepare(`
+      SELECT s.id, s.name, s.max_members
+      FROM squads s
+      JOIN squad_members sm ON sm.squad_id = s.id
+      WHERE s.competition_id = ?
+        AND sm.user_id = ?
+        AND sm.status = 'ACTIVE'
+      LIMIT 1
+    `).get(competitionId, userId) as any;
+
+    const squadMembers = myTournamentSquad
+      ? db.prepare(`
+          SELECT
+            u.google_id,
+            u.gamertag,
+            u.avatar_url,
+            COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.points ELSE 0 END), 0) as points,
+            COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.kills ELSE 0 END), 0) as kills,
+            COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.damage ELSE 0 END), 0) as damage,
+            COALESCE(SUM(CASE WHEN m.competition_id = ? THEN s.assists ELSE 0 END), 0) as assists,
+            COUNT(DISTINCT CASE WHEN m.competition_id = ? THEN s.match_id END) as matches
+          FROM squad_members sm
+          JOIN users u ON u.google_id = sm.user_id
+          LEFT JOIN stats s ON s.user_id = u.google_id
+          LEFT JOIN matches m ON m.match_id = s.match_id
+          WHERE sm.squad_id = ?
+            AND sm.status = 'ACTIVE'
+          GROUP BY u.google_id
+          ORDER BY points DESC, kills DESC
+        `).all(
+          competitionId,
+          competitionId,
+          competitionId,
+          competitionId,
+          competitionId,
+          myTournamentSquad.id,
+        )
+      : [];
+
+    const teams = listTournamentSquads(competitionId);
+    const players = listTournamentPlayers(competitionId);
+    const recentMatches = buildGroupedMatchSeries(competitionId, myTournamentSquad?.id || null);
+
+    const myTeamSummary = myTournamentSquad
+      ? teams.find((team: any) => Number(team.id) === Number(myTournamentSquad.id)) || null
+      : null;
+
+    return {
+      competition,
+      my_squad: myTournamentSquad ? {
+        ...myTournamentSquad,
+        members: squadMembers,
+      } : null,
+      my_team_summary: myTeamSummary,
+      standings: {
+        teams,
+        players,
+      },
+      recent_matches: recentMatches,
+    };
   };
 
   const usePgCore = isPgCoreEnabled();
@@ -1179,6 +1568,95 @@ async function startServer() {
     }
   });
 
+  app.get("/api/player/dashboard/:user_id", (req, res) => {
+    const userId = req.params.user_id;
+
+    try {
+      const { competitions, activeTournament, activeLeague } = getCompetitionContext(userId);
+      const personalOverall = getProgressStats(userId) as any;
+      const tournamentSnapshot = activeTournament ? buildTournamentSnapshot(activeTournament.id, userId) : null;
+
+      const userLeagues = competitions
+        .filter((competition) => competition.type === 'LIGA')
+        .map((leagueCompetition) => {
+          const currentTournament = resolveTournamentForLeague(leagueCompetition.id, userId);
+          const currentSnapshot = currentTournament ? buildTournamentSnapshot(currentTournament.id, userId) : null;
+          const pastTournaments = listPastTournamentsForLeague(leagueCompetition.id, currentTournament?.id || null)
+            .map((tournament) => {
+              const snapshot = buildTournamentSnapshot(tournament.id, userId);
+              return snapshot;
+            })
+            .filter(Boolean);
+
+          return {
+            competition: leagueCompetition,
+            my_progress: {
+              ...getProgressStats(
+                userId,
+                `
+                  AND (
+                    m.competition_id = ?
+                    OR m.competition_id IN (
+                      SELECT id FROM competitions
+                      WHERE type = 'TORNEO' AND parent_league_id = ? AND counts_for_league = 1
+                    )
+                  )
+                `,
+                [leagueCompetition.id, leagueCompetition.id],
+              ),
+            },
+            current_tournament: currentSnapshot,
+            past_tournaments: pastTournaments,
+            standings: {
+              players: listLeaguePlayers(leagueCompetition.id),
+            },
+          };
+        });
+
+      const careerMatches = db.prepare(`
+        SELECT
+          m.match_id,
+          m.processed_at as date,
+          COALESCE(m.mode, 'N/A') as mode,
+          COALESCE(m.position, 'N/A') as position,
+          COALESCE(c.name, 'Sin competencia') as competition_name,
+          COALESCE(c.type, 'N/A') as competition_type,
+          COALESCE(s.kills, 0) as kills,
+          COALESCE(s.points, 0) as points,
+          COALESCE(s.damage, 0) as damage,
+          COALESCE(s.assists, 0) as assists
+        FROM stats s
+        JOIN matches m ON m.match_id = s.match_id
+        LEFT JOIN competitions c ON c.id = m.competition_id
+        WHERE s.user_id = ?
+        ORDER BY m.processed_at DESC
+        LIMIT 20
+      `).all(userId);
+
+      const tabs = [
+        { id: 'career', label: 'Carrera', type: 'CAREER' },
+        { id: 'league', label: 'Ligas', type: 'LIGA' },
+      ];
+
+      res.json({
+        tabs,
+        competitions,
+        active_tournament: activeTournament,
+        active_league: activeLeague,
+        tournament: tournamentSnapshot,
+        leagues: userLeagues,
+        career: {
+          summary: personalOverall,
+          recent_matches: careerMatches,
+        },
+        supported_stats: ['score', 'eliminations', 'kills', 'assists', 'redeploys', 'damage', 'matches'],
+      });
+    } catch (error) {
+      console.error('Error in /api/player/dashboard/:user_id:', error);
+      res.status(500).json({ error: 'Failed to fetch player dashboard' });
+    }
+  });
+
   // API: Progreso individual global
   app.get("/api/progress/overall/:user_id", (req, res) => {
     const userId = req.params.user_id;
@@ -1248,11 +1726,33 @@ async function startServer() {
     const { user_id } = req.params;
     try {
       const squad = db.prepare(`
-        SELECT s.*, sm.status 
+        SELECT s.*, sm.status
         FROM squads s
         JOIN squad_members sm ON s.id = sm.squad_id
         WHERE sm.user_id = ? AND sm.status = 'ACTIVE'
-      `).get(user_id);
+        ORDER BY
+          CASE
+            WHEN s.competition_id IN (
+              SELECT cm.competition_id
+              FROM competition_members cm
+              JOIN competitions c ON c.id = cm.competition_id
+              WHERE cm.user_id = ?
+                AND cm.status = 'ACTIVE'
+                AND c.type = 'TORNEO'
+            ) THEN 0
+            WHEN s.competition_id IN (
+              SELECT cm.competition_id
+              FROM competition_members cm
+              JOIN competitions c ON c.id = cm.competition_id
+              WHERE cm.user_id = ?
+                AND cm.status = 'ACTIVE'
+                AND c.type = 'LIGA'
+            ) THEN 1
+            ELSE 2
+          END,
+          s.id DESC
+        LIMIT 1
+      `).get(user_id, user_id, user_id);
 
       if (!squad) return res.json(null);
 
@@ -1408,9 +1908,37 @@ async function startServer() {
         // 1. Asegurar que la partida exista en la tabla 'matches'
         // Usamos INSERT OR IGNORE para que si ya existe (de otro squad), no falle
         db.prepare(`
-          INSERT OR IGNORE INTO matches (match_id, competition_id, submitted_by, audit_status)
-          VALUES (?, ?, ?, ?)
-        `).run(matchId, Number(competition_id) || 1, userId, 'APPROVED');
+          INSERT INTO matches (
+            match_id,
+            competition_id,
+            submitted_by,
+            mode,
+            position,
+            total_kills,
+            total_score,
+            total_damage,
+            audit_status
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(match_id) DO UPDATE SET
+            competition_id = COALESCE(excluded.competition_id, matches.competition_id),
+            submitted_by = COALESCE(matches.submitted_by, excluded.submitted_by),
+            mode = COALESCE(excluded.mode, matches.mode),
+            position = COALESCE(excluded.position, matches.position),
+            total_kills = MAX(matches.total_kills, excluded.total_kills),
+            total_score = MAX(matches.total_score, excluded.total_score),
+            total_damage = MAX(matches.total_damage, excluded.total_damage)
+        `).run(
+          matchId,
+          Number(competition_id) || 1,
+          userId,
+          mode || null,
+          position || null,
+          Number(totalKills) || 0,
+          Number(totalScore) || 0,
+          Number(totalDamage) || 0,
+          'APPROVED',
+        );
 
         let newlyAddedStats = 0;
 
@@ -1430,15 +1958,27 @@ async function startServer() {
 
           // 3. UPSERT Stats individuales
           // Usamos INSERT ... ON CONFLICT para actualizar si el jugador ya existe 
-          // (ej. subieron primero la pantalla de Victoria y luego el Marcador detallado).
+          // (ej. subiuieron primero la pantalla de Victoria y luego el Marcador detallado).
           const result = db.prepare(`
-            INSERT INTO stats (match_id, user_id, kills, points, damage)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO stats (match_id, user_id, score, eliminations, kills, assists, redeploys, damage)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(match_id, user_id) DO UPDATE SET
+              score = MAX(score, excluded.score),
+              eliminations = MAX(eliminations, excluded.eliminations),
               kills = MAX(kills, excluded.kills),
-              points = MAX(points, excluded.points),
+              assists = MAX(assists, excluded.assists),
+              redeploys = MAX(redeploys, excluded.redeploys),
               damage = MAX(damage, excluded.damage)
-          `).run(matchId, targetUserId, member.kills, member.score, member.damage);
+          `).run(
+            matchId,
+            targetUserId,
+            Number(member.score) || 0,
+            Number(member.eliminations) || 0,
+            Number(member.kills) || 0,
+            Number(member.assists) || 0,
+            Number(member.redeploys) || 0,
+            Number(member.damage) || 0,
+          );
 
           newlyAddedStats++;
         }
@@ -1523,6 +2063,9 @@ async function startServer() {
           COALESCE(sq.name, 'Sin Squad') as squad,
           COALESCE(SUM(s.kills), 0) as kills, 
           COALESCE(SUM(s.points), 0) as points,
+          COALESCE(SUM(s.damage), 0) as damage,
+          COALESCE(SUM(s.assists), 0) as assists,
+          COALESCE(SUM(s.placement_points), 0) as placement_points,
           COUNT(DISTINCT s.match_id) as matches
         FROM users u
         LEFT JOIN squad_members sm ON u.google_id = sm.user_id AND sm.status = 'ACTIVE'
@@ -1547,6 +2090,9 @@ async function startServer() {
           sq.name,
           COALESCE(SUM(s.points), 0) as points,
           COALESCE(SUM(s.kills), 0) as kills,
+          COALESCE(SUM(s.damage), 0) as damage,
+          COALESCE(SUM(s.assists), 0) as assists,
+          COALESCE(SUM(s.placement_points), 0) as placement_points,
           COUNT(DISTINCT s.match_id) as matches
         FROM squads sq
         LEFT JOIN squad_members sm ON sq.id = sm.squad_id AND sm.status = 'ACTIVE'
@@ -1562,6 +2108,8 @@ async function startServer() {
             u.gamertag,
             COALESCE(SUM(s.kills), 0) as kills,
             COALESCE(SUM(s.points), 0) as points,
+            COALESCE(SUM(s.damage), 0) as damage,
+            COALESCE(SUM(s.assists), 0) as assists,
             COUNT(DISTINCT s.match_id) as matches
           FROM squad_members sm
           JOIN users u ON sm.user_id = u.google_id
@@ -1590,16 +2138,24 @@ async function startServer() {
       const matches = db.prepare(`
         SELECT 
           m.match_id as id,
-          COALESCE(sq.name, 'Squad Desconocido') as squad,
+          COALESCE((
+            SELECT sq2.name
+            FROM stats s2
+            JOIN squad_members sm2 ON sm2.user_id = s2.user_id AND sm2.status = 'ACTIVE'
+            JOIN squads sq2 ON sq2.id = sm2.squad_id AND sq2.competition_id = m.competition_id
+            WHERE s2.match_id = m.match_id
+            GROUP BY sq2.id
+            ORDER BY SUM(s2.points) DESC, SUM(s2.kills) DESC
+            LIMIT 1
+          ), 'Squad Desconocido') as squad,
           m.processed_at as date,
-          'Resurgimiento' as mode,
-          '1st' as position,
-          COALESCE(SUM(s.kills), 0) as totalKills,
-          COALESCE(SUM(s.points), 0) as totalScore
+          COALESCE(m.mode, 'N/A') as mode,
+          COALESCE(m.position, 'N/A') as position,
+          COALESCE(MAX(m.total_kills), SUM(s.kills), 0) as totalKills,
+          COALESCE(MAX(m.total_score), SUM(s.points), 0) as totalScore,
+          COALESCE(MAX(m.total_damage), SUM(s.damage), 0) as totalDamage
         FROM matches m
         LEFT JOIN stats s ON m.match_id = s.match_id
-        LEFT JOIN squad_members sm ON s.user_id = sm.user_id AND sm.status = 'ACTIVE'
-        LEFT JOIN squads sq ON sm.squad_id = sq.id
         GROUP BY m.match_id
         ORDER BY m.processed_at DESC
         LIMIT 20
@@ -1620,6 +2176,7 @@ async function startServer() {
           u.gamertag,
           COALESCE(s.kills, 0) as kills,
           COALESCE(s.damage, 0) as damage,
+          COALESCE(s.assists, 0) as assists,
           COALESCE(s.points, 0) as score
         FROM stats s
         JOIN users u ON u.google_id = s.user_id

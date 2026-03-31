@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="87eeb223-5c6c-4475-bb5e-fd47c90ad6b8" name="contabo-axisvia" url="https://axion.axisvia.com">
+        <fileTransfer rootFolder="/var/www/axion" accessType="SFTP" host="144.126.147.252" port="22" sshConfigId="857b929f-d956-48a8-a975-10bfa8af4af6" sshConfig="root@144.126.147.252:22 agent" authAgent="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

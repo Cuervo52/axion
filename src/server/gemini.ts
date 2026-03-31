@@ -19,10 +19,12 @@ export interface WarzoneStats {
   match_id: string;
   players: {
     gamertag: string;
-    kills: number;
     score: number;
-    damage: number;
+    eliminations: number;
+    kills: number;
     assists: number;
+    redeploys: number;
+    damage: number;
   }[];
   is_manipulated: boolean;
   audit_notes?: string;
@@ -46,15 +48,17 @@ export async function processWarzoneCapture(imageUrl: string): Promise<WarzoneSt
       DATOS A EXTRAER POR JUGADOR (Columnas de la tabla):
       - NOMBRE (Gamertag)
       - PUNTUACIÓN (Score)
-      - BAJAS (Kills)
-      - ASISTENCIAS
-      - DAÑO (Damage)
+      - ELIMINACIONES (Total de bajas/jugadores eliminados)
+      - BAJAS (Kills - solo las causadas por el jugador)
+      - ASISTENCIAS (Assists - cuando ayudaste a eliminar un enemigo)
+      - REDESPLIEGUES (Redeploys - cuantas veces regressaste al juego)
+      - DAÑO (Damage - daño total causado)
       
       DATOS DE PARTIDA:
       - ID de la partida (Cadena alfanumérica en las esquinas)
       
       AUDITORÍA DE FRAUDE:
-      - Verifica si los números de "Bajas" coinciden con la suma de la tabla o si hay edición digital.
+      - Verifica si los números son consistentes.
       - Revisa si el ID de la partida ha sido alterado.
       
       Devuelve un JSON estructurado.
@@ -88,12 +92,14 @@ export async function processWarzoneCapture(imageUrl: string): Promise<WarzoneSt
                 type: Type.OBJECT,
                 properties: {
                   gamertag: { type: Type.STRING },
-                  kills: { type: Type.INTEGER },
                   score: { type: Type.INTEGER },
-                  damage: { type: Type.INTEGER },
-                  assists: { type: Type.INTEGER }
+                  eliminations: { type: Type.INTEGER },
+                  kills: { type: Type.INTEGER },
+                  assists: { type: Type.INTEGER },
+                  redeploys: { type: Type.INTEGER },
+                  damage: { type: Type.INTEGER }
                 },
-                required: ["gamertag", "kills", "score", "damage", "assists"]
+                required: ["gamertag", "score", "eliminations", "kills", "assists", "redeploys", "damage"]
               }
             },
             is_manipulated: { type: Type.BOOLEAN },
