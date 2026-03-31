@@ -371,6 +371,20 @@ export function initDb() {
     )
   `);
 
+  // Membresias por liga/torneo (join por link/codigo)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS competition_members (
+      competition_id INTEGER,
+      user_id TEXT,
+      role TEXT DEFAULT 'PLAYER' CHECK(role IN ('ADMIN', 'ORGANIZER', 'PLAYER')),
+      status TEXT DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE', 'LEFT', 'BANNED')),
+      joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (competition_id, user_id),
+      FOREIGN KEY (competition_id) REFERENCES competitions(id),
+      FOREIGN KEY (user_id) REFERENCES users(google_id)
+    )
+  `);
+
   // Competición Default
   const defaultComp = db.prepare("SELECT * FROM competitions WHERE id = 1").get();
   if (!defaultComp) {

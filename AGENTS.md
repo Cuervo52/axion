@@ -1,44 +1,63 @@
 # AGENTS.md
 
-## Panorama rapido (AXION)
-- Monorepo full-stack en TypeScript: un solo proceso `server.ts` levanta Express API y, en dev, inyecta middleware de Vite SPA.
-- Entrada real en desarrollo: `npm run dev` -> `tsx server.ts` (puerto backend/app: `3005`, no `3000`).
-- Frontend React vive en `src/` y consume rutas relativas `/api/*`; en dev no hay proxy en `vite.config.ts`, porque Express hospeda Vite.
-- Persistencia local con SQLite (`warzone.db`) usando `better-sqlite3`; el esquema se crea/migra en `src/server/db.ts` via `initDb()`.
+## Panorama rapido
+- Stack real: un solo proceso `server.ts` corre Express + API + Vite middleware en dev.
+- Puerto real local: `3005` (`npm run dev` ejecuta `tsx server.ts`).
+- Frontend React en `src/` consume rutas relativas `/api/*` (sin proxy Vite en dev).
+- Persistencia: SQLite `warzone.db` via `better-sqlite3`; esquema y migraciones en `src/server/db.ts` (`initDb()`).
 
-## Arquitectura y limites
-- API + boot: `server.ts` (auth Google, squads, leaderboard, analisis IA, guardado de partidas).
-- DB boundary: `src/server/db.ts` centraliza DDL y migracion defensiva de `users` (si falta `google_id`).
-- IA server-side activa: `/api/analyze` en `server.ts` usa `@google/generative-ai` + schema JSON estricto.
-- IA alternativa/legacy: `src/server/gemini.ts` usa `@google/genai`; hoy se consume desde `src/server/whatsapp.ts` (flujo no cableado en Express).
-- UI principal: `src/App.tsx`; login Google en cliente (`src/main.tsx`) y persistencia de sesion en `localStorage` (`axion_user`).
+## Arquitectura actual (como funciona hoy)
+- `server.ts` centraliza boot, endpoints, IA (`/api/analyze`), guardado de partidas y leaderboards.
+- `src/server/db.ts` es el unico boundary de schema: crea tablas y migra columnas legacy phone -> google_id.
+- `src/App.tsx` controla sesion (`localStorage: axion_user`), roles y vistas (`user`, `admin-torneo`, `SUPER_ADMIN`).
+- `src/main.tsx` integra Google OAuth con `GOOGLE_CLIENT_ID` hardcodeado.
+- `SuperAdmin` es UI visual/launcher; operacion real de ligas/torneos vive en `AdminTorneo` + API.
 
-## Flujos clave end-to-end
-- Escaneo de partida: `src/components/EscanearPartida.tsx` -> `src/services/gemini.ts` -> `POST /api/analyze` -> `POST /api/matches`.
-- Guardado de stats usa transaccion + UPSERT en `server.ts` (`ON CONFLICT(match_id, user_id)` con `MAX(...)` para merges de capturas parciales).
-- Onboarding/auth: `GoogleLogin` -> `POST /api/auth/login`; rol `SUPER_ADMIN` se fuerza por email hardcodeado en backend.
-- Squads/invitaciones: `App.tsx` llama `/api/squads*` y `/api/users/:id/{squad,invitations}`; status en `squad_members` (`PENDING`, `ACTIVE`, etc.).
+## Modelo de negocio implementado
+- Entidad unica `competitions` con tipos `LIGA` y `TORNEO`.
+- Un torneo puede colgar de una liga (`parent_league_id`) y opcionalmente contar a la liga (`counts_for_league`).
+- Modo de liga en `rules.league_mode`: `RANDOM` (squads nuevos) o `FIXED_SQUAD` (clona squads del torneo previo).
+- Membresia por contexto en `competition_members` (rol por competencia: `ADMIN`, `ORGANIZER`, `PLAYER`).
+- Progreso disponible en 3 scopes: global, por liga, por torneo (`/api/progress/*`).
 
-## Convenciones del proyecto (observadas)
-- Idioma mixto ES/EN en codigo, logs y respuestas; mantener consistencia local del archivo tocado.
-- SQL inline con `db.prepare(...).run/get/all`; no ORM.
-- Respuestas API en JSON simple (`{ error: ... }`), manejo de errores mostly local por endpoint/componente.
-- Se prioriza resiliencia operacional: limite JSON `50mb` en Express + compresion/redimension de imagen en cliente.
+## Flujos E2E clave
+- Login: `GoogleLogin` -> `POST /api/auth/login` -> upsert user por `google_id/email`.
+- Rol `SUPER_ADMIN` se fuerza por email fijo en backend: `cristhianamador@gmail.com`.
+- Escaneo: `EscanearPartida.tsx` -> `src/services/gemini.ts` -> `POST /api/analyze` -> `POST /api/matches`.
+- Join por invitacion: `?join=CODIGO` o input manual -> `POST /api/invites/:invite_code/join`.
+- Guardado de stats usa transaccion + UPSERT (`ON CONFLICT(match_id, user_id)`) con `MAX(...)` para fusionar capturas parciales.
+- Squads: crear, invitar, aceptar (`/api/squads*`), estado en `squad_members` (`PENDING`, `ACTIVE`, `LEFT`, `REJECTED`).
 
-## Workflows de desarrollo utiles
-- Instalar deps: `npm install`
-- Desarrollo full-stack: `npm run dev`
-- Build produccion: `npm run build` (TypeScript + Vite)
-- Validacion de tipos: `npm run lint` (`tsc --noEmit`)
-- Deploy operativo actual: `deploy.sh` (build + `pm2 restart axion-bot`)
+## Endpoints operativos importantes
+- Salud: `GET /api/health`.
+- Ligas/Torneos: `POST/GET /api/leagues`, `POST/GET /api/tournaments`, `POST /api/tournaments/draft`, `POST /api/tournaments/:id/reset-squads`.
+- Invitaciones/membresias: `GET /api/invites/:invite_code`, `POST /api/invites/:invite_code/join`, `GET /api/users/:user_id/competitions`, `GET /api/competitions/:id/participants`.
+- Admin operativo: `GET /api/admin/overview`.
+- Progreso: `GET /api/progress/overall/:user_id`, `/league/:league_id/:user_id`, `/tournament/:tournament_id/:user_id`.
+- Resultado/juego: `POST /api/analyze`, `POST /api/matches`, `GET /api/matches`, `GET /api/matches/:match_id/members`.
 
-## Integraciones y variables
-- Requiere `GEMINI_API_KEY` (`.env.example`); sin clave, los flujos IA fallan.
-- `APP_URL` se usa en respuestas de WhatsApp para links de invitacion.
-- OAuth client esta hardcodeado en `src/main.tsx` (`GOOGLE_CLIENT_ID`).
+## Convenciones del proyecto
+- Idioma mixto ES/EN en UI/logs/codigo; mantener consistencia por archivo.
+- SQL inline con `db.prepare(...).run/get/all`; no ORM ni capa repository.
+- Errores API simples: `{ error: string }` y `500` local por endpoint.
+- Se prioriza robustez de payload de imagen: cliente reduce imagen y server acepta JSON hasta `50mb`.
 
-## Riesgos/inconsistencias a conocer antes de editar
-- `test-api.js` prueba `http://localhost:3000`, pero el servidor real corre en `3005`.
-- `src/components/AdminTorneo.tsx` llama `/api/tournaments*`; esos endpoints no existen en `server.ts` actual.
-- `src/components/Individual.tsx` y `src/components/Partidas.tsx` usan mock data (no consumen backend).
-- `src/server/whatsapp.ts` referencia columnas no alineadas con schema actual (`admin_phone`, `user_phone`); tratarlo como experimental.
+## Workflows de desarrollo y despliegue
+- Instalar: `npm install`.
+- Dev full-stack: `npm run dev`.
+- Verificar tipos/build: `npm run lint`, `npm run build`.
+- Deploy actual: `deploy.sh` (build + `pm2 restart axion-bot` con `tsx server.ts`).
+
+## Riesgos/deuda real detectada
+- `test-api.js` apunta a `localhost:3000`; backend corre en `3005`.
+- `EscanearPartida.tsx` guarda `POST /api/matches` sin `submitted_by` ni `competition_id`; backend cae a defaults (`admin-google-id`, `competition_id=1`).
+- `GET /api/matches` devuelve `mode='Resurgimiento'` y `position='1st'` fijos; no refleja todos los datos analizados.
+- `SuperAdmin.tsx` muestra metricas mostly estaticas (no conectadas a API real).
+- `src/server/whatsapp.ts` y `src/server/gemini.ts` existen como flujo alterno/experimental no expuesto por rutas Express principales.
+
+## Referencias clave para cambios futuros
+- API y reglas de negocio: `server.ts`
+- Esquema/migracion: `src/server/db.ts`
+- Orquestacion UI y roles: `src/App.tsx`
+- Operacion de ligas/torneos: `src/components/AdminTorneo.tsx`
+- Escaneo IA y guardado: `src/components/EscanearPartida.tsx`, `src/services/gemini.ts`

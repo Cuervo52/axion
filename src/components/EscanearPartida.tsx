@@ -7,6 +7,8 @@ import { analyzeMatchScreenshot } from '../services/gemini';
 interface EscanearPartidaProps {
   isOpen: boolean;
   onClose: () => void;
+  submittedBy?: string;
+  competitionId?: number | null;
 }
 
 interface ExtractedData {
@@ -24,7 +26,7 @@ interface ExtractedData {
   }>;
 }
 
-export default function EscanearPartida({ isOpen, onClose }: EscanearPartidaProps) {
+export default function EscanearPartida({ isOpen, onClose, submittedBy, competitionId }: EscanearPartidaProps) {
   const [step, setStep] = useState<'upload' | 'processing' | 'review' | 'success'>('upload');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -358,7 +360,11 @@ export default function EscanearPartida({ isOpen, onClose }: EscanearPartidaProp
                           const response = await fetch('/api/matches', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(extractedData),
+                            body: JSON.stringify({
+                              ...extractedData,
+                              submitted_by: submittedBy,
+                              competition_id: competitionId || undefined,
+                            }),
                           });
 
                           if (response.status === 409) {

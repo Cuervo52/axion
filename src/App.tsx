@@ -21,6 +21,17 @@ interface UserData {
   phone?: string;
 }
 
+interface CompetitionMembership {
+  id: number;
+  name: string;
+  type: 'LIGA' | 'TORNEO';
+  status: string;
+  parent_league_id?: number | null;
+  invite_code?: string;
+  role: 'ADMIN' | 'ORGANIZER' | 'PLAYER';
+  member_status: 'ACTIVE' | 'LEFT' | 'BANNED';
+}
+
 export default function App() {
   const [user, setUser] = useState<UserData | null>(() => {
     const saved = localStorage.getItem('axion_user');
@@ -38,6 +49,54 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isCreatingSquad, setIsCreatingSquad] = useState(false);
+  const [myCompetitions, setMyCompetitions] = useState<CompetitionMembership[]>([]);
+  const [joinCode, setJoinCode] = useState('');
+  const [isJoiningCompetition, setIsJoiningCompetition] = useState(false);
+  const [joinFeedback, setJoinFeedback] = useState<string | null>(null);
+  const [handledJoinCode, setHandledJoinCode] = useState<string | null>(null);
+
+  const fallbackCompetitionId = myCompetitions.find((competition) => competition.type === 'TORNEO' && competition.member_status === 'ACTIVE')?.id
+    || myCompetitions.find((competition) => competition.type === 'LIGA' && competition.member_status === 'ACTIVE')?.id
+    || null;
+
+  const activeCompetitionId = squad?.competition_id ? Number(squad.competition_id) : fallbackCompetitionId;
+
+  const fetchMyCompetitions = async (google_id: string) => {
+    try {
+      const res = await fetch(`/api/users/${google_id}/competitions`);
+      const data = await res.json();
+      setMyCompetitions(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('Competitions fetch error', e);
+    }
+  };
+
+  const joinCompetitionByCode = async (rawCode: string) => {
+    if (!user) return;
+    const code = rawCode.trim().toUpperCase();
+    if (!code) return;
+
+    setIsJoiningCompetition(true);
+    setJoinFeedback(null);
+    try {
+      const res = await fetch(`/api/invites/${encodeURIComponent(code)}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: user.google_id }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      await fetchMyCompetitions(user.google_id);
+      setJoinFeedback(`Listo: ya entraste a ${data.competition?.name || 'la competencia'}.`);
+      setJoinCode('');
+      fetchSquadData(user.google_id);
+    } catch (e: any) {
+      setJoinFeedback(e.message || 'No se pudo unir a la competencia.');
+    } finally {
+      setIsJoiningCompetition(false);
+    }
+  };
 
   const handleGoogleLogin = async (credentialResponse: any) => {
     console.log("[AUTH] Google Login response received:", credentialResponse);
@@ -76,6 +135,7 @@ export default function App() {
         console.log("[AUTH] Proceeding to dashboard");
         fetchSquadData(loginData.google_id);
         fetchInvitations(loginData.google_id);
+        fetchMyCompetitions(loginData.google_id);
       }
     } catch (e) {
       console.error("[AUTH] Login process failed:", e);
@@ -129,6 +189,7 @@ export default function App() {
 
       // Intentar cargar squad después de configurar perfil
       fetchSquadData(user.google_id);
+      fetchMyCompetitions(user.google_id);
     } catch (e) {
       console.error("Profile update failed", e);
     } finally {
@@ -138,11 +199,15 @@ export default function App() {
 
   const createSquad = async (name: string) => {
     if (!user) return;
+    if (!activeCompetitionId) {
+      alert('Primero unete a una liga o torneo para crear un squad en el contexto correcto.');
+      return;
+    }
     try {
       await fetch('/api/squads', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, leader_id: user.google_id, competition_id: 1 })
+        body: JSON.stringify({ name, leader_id: user.google_id, competition_id: activeCompetitionId })
       });
       fetchSquadData(user.google_id);
       setIsCreatingSquad(false);
@@ -180,9 +245,20 @@ export default function App() {
       } else {
         fetchSquadData(user.google_id);
         fetchInvitations(user.google_id);
+        fetchMyCompetitions(user.google_id);
       }
     }
   }, []); // Run once on mount to load initial data if user is stored in localStorage
+
+  useEffect(() => {
+    if (!user) return;
+    const url = new URL(window.location.href);
+    const code = (url.searchParams.get('join') || '').trim().toUpperCase();
+    if (!code || handledJoinCode === code) return;
+
+    setHandledJoinCode(code);
+    joinCompetitionByCode(code);
+  }, [user, handledJoinCode]);
 
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve) => {
@@ -401,6 +477,64 @@ export default function App() {
           {/* Main Content Area */}
           <main className="w-full max-w-7xl mx-auto px-4 mt-4 space-y-6">
 
+            <section className="bg-[#0B0E14] border border-white/5 rounded-3xl p-6 space-y-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h2 className="text-lg font-black text-white uppercase tracking-tight">Mis ligas y torneos</h2>
+                  <p className="text-xs text-slate-400">Entra por codigo/link o crea desde panel admin.</p>
+                </div>
+                {(user.role === 'ADMIN' || user.role === 'SUPER_ADMIN') && (
+                  <button
+                    onClick={() => setForceView('admin-torneo')}
+                    className="px-4 py-2 bg-purple-600 rounded-xl text-xs font-bold text-white hover:bg-purple-500 transition-colors"
+                  >
+                    Ir a Admin Torneo
+                  </button>
+                )}
+              </div>
+
+              <div className="flex gap-2 flex-wrap">
+                <input
+                  type="text"
+                  value={joinCode}
+                  onChange={(e) => setJoinCode(e.target.value)}
+                  placeholder="Pega codigo de invitacion (ej. A1B2C3)"
+                  className="flex-1 min-w-[220px] bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white"
+                />
+                <button
+                  onClick={() => joinCompetitionByCode(joinCode)}
+                  disabled={!joinCode.trim() || isJoiningCompetition}
+                  className="px-4 py-2 bg-emerald-600 rounded-xl text-xs font-bold text-white disabled:opacity-50"
+                >
+                  {isJoiningCompetition ? 'Uniendo...' : 'Unirme'}
+                </button>
+              </div>
+
+              {joinFeedback && <div className="text-xs text-purple-300">{joinFeedback}</div>}
+
+              {myCompetitions.length === 0 ? (
+                <div className="text-sm text-slate-400 bg-white/5 border border-white/10 rounded-2xl p-4">
+                  Aun no perteneces a ninguna liga/torneo. Puedes unirte con codigo o abrir tus estadisticas mientras arrancan.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {myCompetitions.slice(0, 8).map((item) => (
+                    <div key={`${item.type}-${item.id}`} className="bg-white/5 border border-white/10 rounded-2xl p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase">{item.type}</span>
+                        <span className="text-[10px] text-purple-300 font-bold">{item.role}</span>
+                      </div>
+                      <div className="text-sm font-bold text-white mt-1">{item.name}</div>
+                      <div className="text-[11px] text-slate-400 mt-1">Status: {item.status}</div>
+                      {item.invite_code && (
+                        <div className="text-[11px] text-slate-500 mt-1 font-mono">Codigo: {item.invite_code}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
             {/* Invitations Alert */}
             <AnimatePresence>
               {invitations.length > 0 && invitations.map((inv) => (
@@ -564,7 +698,12 @@ export default function App() {
               </>
             )}
 
-            {viewMode === 'admin-torneo' && <AdminTorneo />}
+            {viewMode === 'admin-torneo' && (
+              <AdminTorneo
+                currentUser={user}
+                myCompetitions={myCompetitions}
+              />
+            )}
           </main>
 
           {/* Logout Floating Button */}
@@ -711,7 +850,12 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <EscanearPartida isOpen={isScanOpen} onClose={() => setIsScanOpen(false)} />
+      <EscanearPartida
+        isOpen={isScanOpen}
+        onClose={() => setIsScanOpen(false)}
+        submittedBy={user?.google_id}
+        competitionId={activeCompetitionId}
+      />
 
       <AnimatePresence>
         {isProfileSetupOpen && (
