@@ -1,12 +1,10 @@
 import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import { initDb } from "./src/server/db";
 import { handleWhatsAppMessage } from "./src/server/whatsapp";
 import db from "./src/server/db";
 import { initPgSchema, isPgCoreEnabled, pgQuery } from "./src/server/pg";
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
-import { getDbAdapter, initPgPool, isPgEnabled, convertSqlParams } from "./src/server/dbAdapter";
 
 // Inicializar cliente de Gemini (Server-side)
 // Limpiamos la clave de posibles comillas si vienen del .env
@@ -18,14 +16,12 @@ async function startServer() {
   const app = express();
   const PORT = 3005;
 
-  // Inicializar BD
-  if (isPgEnabled()) {
-    console.log('🔵 Usando PostgreSQL como core');
-    await initPgPool();
-  } else {
-    console.log('🟡 Usando SQLite como core');
-    initDb();
+  // Forzar PostgreSQL como core: sin fallback silencioso a SQLite
+  if (!isPgCoreEnabled()) {
+    throw new Error("PostgreSQL core no habilitado. Define DB_CORE_PG=1 y DATABASE_URL en .env");
   }
+  await initPgSchema();
+  console.log("🔵 PostgreSQL core habilitado");
 
   const makeInviteCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
 
@@ -488,13 +484,9 @@ async function startServer() {
     next();
   });
 
-  // Inicializar DB
-  initDb();
-  await initPgSchema();
-
   // API: Health Check
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.json({ status: "ok", db_core: "postgres" });
   });
 
   // API: Google Auth Login
