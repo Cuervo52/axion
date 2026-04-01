@@ -31,6 +31,24 @@ interface CompetitionMembership {
   member_status: 'ACTIVE' | 'LEFT' | 'BANNED';
 }
 
+const parseActivisionId = (raw: string | undefined) => {
+  const value = String(raw || '').trim();
+  const parts = value.split('#');
+  if (parts.length < 2) {
+    return { name: value, tagNumber: '' };
+  }
+  const name = parts[0].trim();
+  const tagNumber = parts.slice(1).join('').replace(/\D/g, '').slice(0, 15);
+  return { name, tagNumber };
+};
+
+const composeActivisionId = (name: string, tagNumber: string) => {
+  const cleanName = name.trim();
+  const cleanTag = tagNumber.replace(/\D/g, '').slice(0, 15);
+  if (!cleanName) return '';
+  return cleanTag ? `${cleanName} # ${cleanTag}` : cleanName;
+};
+
 export default function App() {
   const [user, setUser] = useState<UserData | null>(() => {
     const saved = localStorage.getItem('axion_user');
@@ -43,6 +61,10 @@ export default function App() {
   const [isScanOpen, setIsScanOpen] = useState(false);
   const [isProfileSetupOpen, setIsProfileSetupOpen] = useState(false);
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [profileTagNumber, setProfileTagNumber] = useState('');
+  const [profileEmail, setProfileEmail] = useState('');
+  const [profileAvatar, setProfileAvatar] = useState<string | null>(null);
   const [squad, setSquad] = useState<any>(null);
   const [invitations, setInvitations] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -170,27 +192,31 @@ export default function App() {
     } catch (e) { console.error("Accept error", e); }
   };
 
-  const handleProfileUpdate = async (tag: string, avatar: string | null) => {
+  const handleProfileUpdate = async (tag: string, avatar: string | null, email?: string) => {
     if (!user) return;
     setIsUpdatingProfile(true);
     try {
       const res = await fetch('/api/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ google_id: user.google_id, gamertag: tag, avatar_url: avatar })
+        body: JSON.stringify({ google_id: user.google_id, gamertag: tag, avatar_url: avatar, email })
       });
       const data = await res.json();
-      if (data.error) throw new Error(data.error);
+      if (!res.ok || data?.error) throw new Error(data?.error || 'No se pudo guardar el perfil.');
+      if (!data) throw new Error('No se pudo guardar el perfil. Usuario no encontrado.');
 
       setUser(data);
       localStorage.setItem('axion_user', JSON.stringify(data));
       setIsProfileSetupOpen(false);
+      setIsSettingsOpen(false);
+      alert('Perfil actualizado.');
 
       // Intentar cargar squad después de configurar perfil
       fetchSquadData(user.google_id);
       fetchMyCompetitions(user.google_id);
-    } catch (e) {
+    } catch (e: any) {
       console.error("Profile update failed", e);
+      alert(e?.message || 'No se pudo guardar el perfil.');
     } finally {
       setIsUpdatingProfile(false);
     }
@@ -266,6 +292,15 @@ export default function App() {
       localStorage.removeItem('axion_force_view');
     }
   }, [forceView]);
+
+  useEffect(() => {
+    if (!user) return;
+    const parsed = parseActivisionId(user.gamertag);
+    setProfileName(parsed.name);
+    setProfileTagNumber(parsed.tagNumber);
+    setProfileEmail(user.email || '');
+    setProfileAvatar(user.avatar_url || null);
+  }, [user]);
 
   const activeTournament = myCompetitions.find((competition) => competition.type === 'TORNEO' && competition.member_status === 'ACTIVE') || null;
   const activeLeague = myCompetitions.find((competition) => competition.type === 'LIGA' && competition.member_status === 'ACTIVE') || null;
@@ -466,6 +501,12 @@ export default function App() {
                     <div className="space-y-2">
                       <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 px-2">Vistas</h3>
                       <button
+                        onClick={() => { setIsSettingsOpen(true); setIsMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                      >
+                        <Settings size={18} className="text-emerald-400" /> Editar usuario
+                      </button>
+                      <button
                         onClick={() => { setForceView('admin-torneo'); setIsMenuOpen(false); }}
                         className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
                       >
@@ -566,6 +607,40 @@ export default function App() {
                     </motion.div>
                   ))}
                 </AnimatePresence>
+
+                {playerState === 'tournament_sorted' && tournamentSquadMembers ? (
+                  <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-6 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-purple-600/20 flex items-center justify-center text-purple-400">
+                          <Users size={20} />
+                        </div>
+                        <div>
+                          <h2 className="text-lg font-black text-white uppercase tracking-tight">{squad?.name || 'Tu squad'}</h2>
+                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Squad del torneo activo</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {tournamentSquadMembers.map((member: any, i: number) => (
+                        <div key={`${member.id || member.gamertag}-${i}`} className="flex items-center gap-3 p-3 bg-white/5 rounded-2xl border border-white/5 min-w-0">
+                          <div className="w-10 h-10 rounded-xl bg-slate-800 flex-shrink-0 relative overflow-hidden">
+                            {member.avatar_url ? (
+                              <img src={member.avatar_url} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full bg-gradient-to-br from-slate-700 to-slate-800" />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold truncate text-slate-200">{member.gamertag}</p>
+                            <p className="text-[10px] text-slate-500">Miembro</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
 
                 {playerState === 'idle' && myCompetitions.some((item) => item.type === 'TORNEO') ? (
                   <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-8 flex flex-col items-center text-center space-y-4">
@@ -703,52 +778,73 @@ export default function App() {
                 </div>
 
                 <div className="p-4 space-y-4">
-                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-purple-500/20 rounded-lg text-purple-400"><Bell size={18} /></div>
-                      <div>
-                        <div className="text-sm font-bold text-white">Notificaciones</div>
-                        <div className="text-[10px] text-slate-400">Alertas de partidas y torneos</div>
+                  <div className="flex items-center gap-4">
+                    <div className="relative">
+                      <div className="w-16 h-16 rounded-xl overflow-hidden border border-white/10 bg-black/30">
+                        {profileAvatar ? (
+                          <img src={profileAvatar} alt="Avatar" className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-slate-500">
+                            <Camera size={20} />
+                          </div>
+                        )}
                       </div>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          const compressed = await compressImage(file);
+                          setProfileAvatar(compressed);
+                        }}
+                        className="absolute inset-0 opacity-0 cursor-pointer"
+                      />
                     </div>
-                    <div className="w-10 h-5 bg-purple-600 rounded-full relative cursor-pointer">
-                      <div className="absolute right-1 top-1 w-3 h-3 bg-white rounded-full shadow-sm" />
+                    <div>
+                      <div className="text-sm font-bold text-white">Foto de perfil</div>
+                      <div className="text-[11px] text-slate-500">Toca la imagen para cambiarla.</div>
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-blue-500/20 rounded-lg text-blue-400"><Moon size={18} /></div>
-                      <div>
-                        <div className="text-sm font-bold text-white">Modo Oscuro</div>
-                        <div className="text-[10px] text-slate-400">Siempre activo en AXION</div>
-                      </div>
-                    </div>
-                    <div className="w-10 h-5 bg-slate-700 rounded-full relative cursor-not-allowed opacity-50">
-                      <div className="absolute right-1 top-1 w-3 h-3 bg-slate-400 rounded-full shadow-sm" />
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Activision ID</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={profileName}
+                        onChange={(e) => setProfileName(e.target.value)}
+                        placeholder="Ej: ElCuervo50"
+                        className="min-w-0 flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white placeholder:text-slate-600 focus:outline-none focus:border-purple-500"
+                      />
+                      <div className="shrink-0 px-3 py-2 rounded-xl border border-white/10 bg-white/5 text-slate-300 font-black">#</div>
+                      <input
+                        value={profileTagNumber}
+                        onChange={(e) => setProfileTagNumber(e.target.value.replace(/\D/g, '').slice(0, 15))}
+                        placeholder="123456789"
+                        inputMode="numeric"
+                        className="w-28 sm:w-40 shrink-0 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white placeholder:text-slate-600 focus:outline-none focus:border-purple-500"
+                      />
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-emerald-500/20 rounded-lg text-emerald-400"><Languages size={18} /></div>
-                      <div>
-                        <div className="text-sm font-bold text-white">Idioma</div>
-                        <div className="text-[10px] text-slate-400">Español (MX)</div>
-                      </div>
-                    </div>
-                    <span className="text-xs text-slate-500 font-mono">ES</span>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Correo</label>
+                    <input
+                      type="email"
+                      value={profileEmail}
+                      onChange={(e) => setProfileEmail(e.target.value)}
+                      placeholder="tu_correo@dominio.com"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-white placeholder:text-slate-600 focus:outline-none focus:border-purple-500"
+                    />
                   </div>
 
-                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 bg-yellow-500/20 rounded-lg text-yellow-400"><HelpCircle size={18} /></div>
-                      <div>
-                        <div className="text-sm font-bold text-white">Ayuda y Soporte</div>
-                        <div className="text-[10px] text-slate-400">Contactar a soporte</div>
-                      </div>
-                    </div>
-                  </div>
+                  <button
+                    disabled={isUpdatingProfile || !profileName.trim()}
+                    onClick={() => handleProfileUpdate(composeActivisionId(profileName, profileTagNumber), profileAvatar, profileEmail)}
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-purple-500 text-white text-sm font-bold disabled:opacity-50"
+                  >
+                    {isUpdatingProfile ? 'Guardando...' : 'Guardar cambios'}
+                  </button>
                 </div>
 
                 <div className="p-4 bg-black/20 text-center text-[10px] text-slate-600 font-mono">
@@ -798,6 +894,7 @@ export default function App() {
                       const file = e.target.files?.[0];
                       if (file) {
                         const compressed = await compressImage(file);
+                        setProfileAvatar(compressed);
                         setUser(prev => prev ? { ...prev, avatar_url: compressed } : null);
                       }
                     }}
@@ -806,22 +903,30 @@ export default function App() {
                 </div>
 
                 <div className="w-full space-y-2">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Activision ID (Gamertag#1234)</label>
-                  <input
-                    id="gamertag-input"
-                    type="text"
-                    placeholder="Ej: SoapMactavish#117"
-                    defaultValue={user?.gamertag?.includes('PLAYER') ? '' : user?.gamertag}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-purple-500 transition-all font-mono"
-                  />
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Activision ID</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="Ej: ElCuervo50"
+                      value={profileName}
+                      onChange={(e) => setProfileName(e.target.value)}
+                      className="min-w-0 flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-purple-500 transition-all"
+                    />
+                    <div className="shrink-0 px-4 py-3 rounded-xl border border-white/10 bg-white/5 text-slate-300 font-black">#</div>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="123456789"
+                      value={profileTagNumber}
+                      onChange={(e) => setProfileTagNumber(e.target.value.replace(/\D/g, '').slice(0, 15))}
+                      className="w-28 sm:w-40 shrink-0 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:border-purple-500 transition-all"
+                    />
+                  </div>
                 </div>
 
                 <button
                   disabled={isUpdatingProfile}
-                  onClick={() => {
-                    const input = document.getElementById('gamertag-input') as HTMLInputElement;
-                    handleProfileUpdate(input.value, user?.avatar_url || null);
-                  }}
+                  onClick={() => handleProfileUpdate(composeActivisionId(profileName, profileTagNumber), profileAvatar || user?.avatar_url || null, profileEmail || user?.email)}
                   className="w-full py-4 rounded-xl bg-gradient-to-r from-purple-600 to-purple-500 text-white font-bold hover:shadow-[0_0_20px_rgba(168,85,247,0.4)] transition-all disabled:opacity-50"
                 >
                   {isUpdatingProfile ? 'Guardando...' : 'Empezar a Competir'}

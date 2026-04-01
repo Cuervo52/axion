@@ -72,6 +72,8 @@ export function initDb() {
       rules TEXT,
       start_date DATETIME,
       end_date DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      deleted_at DATETIME,
       FOREIGN KEY (admin_id) REFERENCES users(google_id),
       FOREIGN KEY (parent_league_id) REFERENCES competitions(id)
     )
@@ -91,6 +93,14 @@ export function initDb() {
     }
     if (!compCols.includes('counts_for_league')) {
       db.exec("ALTER TABLE competitions ADD COLUMN counts_for_league INTEGER DEFAULT 0 CHECK(counts_for_league IN (0, 1))");
+    }
+
+    if (!compCols.includes('created_at')) {
+      db.exec("ALTER TABLE competitions ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP");
+    }
+
+    if (!compCols.includes('deleted_at')) {
+      db.exec("ALTER TABLE competitions ADD COLUMN deleted_at DATETIME");
     }
 
     // Backfill legacy admin_phone -> admin_id cuando exista mapeo por users.phone

@@ -498,8 +498,8 @@ async function startServer() {
 
       if (usePgCore) {
         const userRes = await pgQuery(`
-          SELECT * FROM users WHERE google_id = $1 OR email = $2 LIMIT 1
-        `, [google_id, email]);
+          SELECT * FROM users WHERE google_id = $1 LIMIT 1
+        `, [google_id]);
         let user = userRes.rows[0] as any;
 
         if (!user) {
@@ -511,16 +511,6 @@ async function startServer() {
           `, [google_id, email, gamertag, role, avatar_url || null]);
           user = insertRes.rows[0];
         } else {
-          if (user.google_id !== google_id) {
-            const updateGoogleRes = await pgQuery(`
-              UPDATE users
-              SET google_id = $1, avatar_url = COALESCE(avatar_url, $2)
-              WHERE email = $3
-              RETURNING *
-            `, [google_id, avatar_url || null, email]);
-            user = updateGoogleRes.rows[0];
-          }
-
           if (email === 'cristhianamador@gmail.com' && user.role !== 'SUPER_ADMIN') {
             const roleRes = await pgQuery(`
               UPDATE users SET role = 'SUPER_ADMIN' WHERE email = $1 RETURNING *
@@ -530,8 +520,8 @@ async function startServer() {
 
           if (avatar_url && !user.avatar_url) {
             const avatarRes = await pgQuery(`
-              UPDATE users SET avatar_url = $1 WHERE email = $2 RETURNING *
-            `, [avatar_url, email]);
+              UPDATE users SET avatar_url = $1 WHERE google_id = $2 RETURNING *
+            `, [avatar_url, google_id]);
             user = avatarRes.rows[0] || user;
           }
         }
@@ -580,20 +570,56 @@ async function startServer() {
 
   // API: Actualizar Perfil
   app.post("/api/profile", async (req, res) => {
-    const { google_id, gamertag, avatar_url } = req.body;
+    const { google_id, gamertag, avatar_url, email } = req.body;
     try {
+      if (!google_id || !String(google_id).trim()) {
+        return res.status(400).json({ error: 'google_id is required' });
+      }
+      const normalizedEmail = String(email || '').trim();
       if (usePgCore) {
+        if (normalizedEmail) {
+          const emailUsed = await pgQuery(`
+            SELECT google_id FROM users WHERE email = $1 AND google_id <> $2 LIMIT 1
+          `, [normalizedEmail, google_id]);
+          if (emailUsed.rows.length > 0) {
+            return res.status(400).json({ error: 'Ese correo ya está en uso por otra cuenta.' });
+          }
+        }
+
+        const role = normalizedEmail === 'cristhianamador@gmail.com' ? 'SUPER_ADMIN' : 'PLAYER';
         const result = await pgQuery(`
-          UPDATE users
-          SET gamertag = $1, avatar_url = $2
-          WHERE google_id = $3
+          INSERT INTO users (google_id, email, gamertag, role, avatar_url)
+          VALUES ($1, NULLIF($2, ''), $3, $4, $5)
+          ON CONFLICT (google_id) DO UPDATE SET
+            gamertag = EXCLUDED.gamertag,
+            avatar_url = EXCLUDED.avatar_url,
+            email = COALESCE(NULLIF(EXCLUDED.email, ''), users.email),
+            role = CASE
+              WHEN COALESCE(NULLIF(EXCLUDED.email, ''), users.email) = 'cristhianamador@gmail.com' THEN 'SUPER_ADMIN'
+              ELSE users.role
+            END
           RETURNING *
-        `, [gamertag, avatar_url || null, google_id]);
-        return res.json(result.rows[0] || null);
+        `, [google_id, normalizedEmail, gamertag, role, avatar_url || null]);
+        return res.json(result.rows[0]);
       }
 
-      db.prepare('UPDATE users SET gamertag = ?, avatar_url = ? WHERE google_id = ?')
-        .run(gamertag, avatar_url, google_id);
+      if (normalizedEmail) {
+        const emailUsed = db.prepare('SELECT google_id FROM users WHERE email = ? AND google_id <> ? LIMIT 1')
+          .get(normalizedEmail, google_id) as any;
+        if (emailUsed) {
+          return res.status(400).json({ error: 'Ese correo ya está en uso por otra cuenta.' });
+        }
+      }
+
+      const existingUser = db.prepare('SELECT google_id FROM users WHERE google_id = ?').get(google_id) as any;
+      if (!existingUser) {
+        const role = normalizedEmail === 'cristhianamador@gmail.com' ? 'SUPER_ADMIN' : 'PLAYER';
+        db.prepare('INSERT INTO users (google_id, email, gamertag, role, avatar_url) VALUES (?, ?, ?, ?, ?)')
+          .run(google_id, normalizedEmail || null, gamertag, role, avatar_url || null);
+      } else {
+        db.prepare('UPDATE users SET gamertag = ?, avatar_url = ?, email = COALESCE(NULLIF(?, \"\"), email) WHERE google_id = ?')
+          .run(gamertag, avatar_url, normalizedEmail, google_id);
+      }
 
       const updatedUser = db.prepare('SELECT * FROM users WHERE google_id = ?').get(google_id);
       res.json(updatedUser);
@@ -604,8 +630,17 @@ async function startServer() {
   });
 
   // API: Listar Usuarios Disponibles (sin squad activo)
-  app.get("/api/users/available", (req, res) => {
+  app.get("/api/users/available", async (req, res) => {
     try {
+      if (usePgCore) {
+        const users = await pgQuery(`
+          SELECT u.* FROM users u
+          WHERE u.google_id NOT IN (
+            SELECT user_id FROM squad_members WHERE status = 'ACTIVE'
+          )
+        `);
+        return res.json(users.rows);
+      }
       const users = db.prepare(`
         SELECT u.* FROM users u
         WHERE u.google_id NOT IN (
@@ -619,9 +654,20 @@ async function startServer() {
   });
 
   // API: Buscar Usuarios para Invitar (sin squad activo)
-  app.get("/api/users/search", (req, res) => {
+  app.get("/api/users/search", async (req, res) => {
     const { q } = req.query;
     try {
+      if (usePgCore) {
+        const users = await pgQuery(`
+          SELECT google_id, gamertag, avatar_url FROM users
+          WHERE gamertag ILIKE $1
+          AND google_id NOT IN (
+            SELECT user_id FROM squad_members WHERE status = 'ACTIVE'
+          )
+          LIMIT 5
+        `, [`%${q}%`]);
+        return res.json(users.rows);
+      }
       const users = db.prepare(`
         SELECT google_id, gamertag, avatar_url FROM users
         WHERE gamertag LIKE ? 
@@ -637,9 +683,27 @@ async function startServer() {
   });
 
   // API: Crear Squad
-  app.post("/api/squads", (req, res) => {
+  app.post("/api/squads", async (req, res) => {
     const { name, leader_id, competition_id } = req.body;
     try {
+      if (usePgCore) {
+        const result = await pgQuery(`
+          INSERT INTO squads (name, leader_id, competition_id)
+          VALUES ($1, $2, $3)
+          RETURNING id
+        `, [name, leader_id, competition_id]);
+
+        const squadId = Number(result.rows[0].id);
+
+        await pgQuery(`
+          INSERT INTO squad_members (squad_id, user_id, status)
+          VALUES ($1, $2, 'ACTIVE')
+          ON CONFLICT (squad_id, user_id) DO UPDATE SET status = 'ACTIVE'
+        `, [squadId, leader_id]);
+
+        return res.json({ id: squadId, name, leader_id });
+      }
+
       const result = db.prepare('INSERT INTO squads (name, leader_id, competition_id) VALUES (?, ?, ?)')
         .run(name, leader_id, competition_id);
 
@@ -656,9 +720,18 @@ async function startServer() {
   });
 
   // API: Invitar a Jugador
-  app.post("/api/squads/invite", (req, res) => {
+  app.post("/api/squads/invite", async (req, res) => {
     const { squad_id, user_id } = req.body;
     try {
+      if (usePgCore) {
+        await pgQuery(`
+          INSERT INTO squad_members (squad_id, user_id, status)
+          VALUES ($1, $2, 'PENDING')
+          ON CONFLICT (squad_id, user_id) DO UPDATE SET status = 'PENDING'
+        `, [squad_id, user_id]);
+        return res.json({ success: true });
+      }
+
       db.prepare('INSERT INTO squad_members (squad_id, user_id, status) VALUES (?, ?, ?)')
         .run(squad_id, user_id, 'PENDING');
       res.json({ success: true });
@@ -668,9 +741,18 @@ async function startServer() {
   });
 
   // API: Aceptar Invitación
-  app.post("/api/squads/accept", (req, res) => {
+  app.post("/api/squads/accept", async (req, res) => {
     const { squad_id, user_id } = req.body;
     try {
+      if (usePgCore) {
+        await pgQuery(`
+          UPDATE squad_members
+          SET status = 'ACTIVE'
+          WHERE squad_id = $1 AND user_id = $2
+        `, [squad_id, user_id]);
+        return res.json({ success: true });
+      }
+
       db.prepare('UPDATE squad_members SET status = "ACTIVE" WHERE squad_id = ? AND user_id = ?')
         .run(squad_id, user_id);
       res.json({ success: true });
@@ -739,20 +821,23 @@ async function startServer() {
 
   // API: Listar Ligas
   app.get("/api/leagues", async (req, res) => {
+    const includeTrashed = String(req.query.include_trashed || '') === '1';
     try {
       const rows = usePgCore
         ? (await pgQuery(`
-            SELECT id, name, status, invite_code, admin_id, rules, start_date, end_date
+            SELECT id, name, status, invite_code, admin_id, rules, start_date, end_date, created_at, deleted_at
             FROM competitions
             WHERE type = 'LIGA'
+              AND ($1::int = 1 OR deleted_at IS NULL)
             ORDER BY id DESC
-          `)).rows
+          `, [includeTrashed ? 1 : 0])).rows
         : db.prepare(`
-        SELECT id, name, status, invite_code, admin_id, rules, start_date, end_date
+        SELECT id, name, status, invite_code, admin_id, rules, start_date, end_date, created_at, deleted_at
         FROM competitions
         WHERE type = 'LIGA'
+          AND (? = 1 OR deleted_at IS NULL)
         ORDER BY id DESC
-      `).all();
+      `).all(includeTrashed ? 1 : 0);
       res.json((rows as any[]).map((row) => {
         const parsed = parseRules((row as any).rules);
         return {
@@ -874,34 +959,40 @@ async function startServer() {
   // API: Listar Torneos (filtrable por liga)
   app.get("/api/tournaments", async (req, res) => {
     const leagueId = req.query.league_id ? Number(req.query.league_id) : null;
+    const includeTrashed = String(req.query.include_trashed || '') === '1';
     try {
       const rows = usePgCore
         ? (leagueId
           ? (await pgQuery(`
               SELECT id, name, status, admin_id, parent_league_id, counts_for_league, invite_code, rules, start_date, end_date
+                     , created_at, deleted_at
               FROM competitions
               WHERE type = 'TORNEO' AND parent_league_id = $1
+                AND ($2::int = 1 OR deleted_at IS NULL)
               ORDER BY id DESC
-            `, [leagueId])).rows
+            `, [leagueId, includeTrashed ? 1 : 0])).rows
           : (await pgQuery(`
-              SELECT id, name, status, admin_id, parent_league_id, counts_for_league, invite_code, rules, start_date, end_date
+              SELECT id, name, status, admin_id, parent_league_id, counts_for_league, invite_code, rules, start_date, end_date, created_at, deleted_at
               FROM competitions
               WHERE type = 'TORNEO'
+                AND ($1::int = 1 OR deleted_at IS NULL)
               ORDER BY id DESC
-            `)).rows)
+            `, [includeTrashed ? 1 : 0])).rows)
         : (leagueId
         ? db.prepare(`
-            SELECT id, name, status, admin_id, parent_league_id, counts_for_league, invite_code, rules, start_date, end_date
+            SELECT id, name, status, admin_id, parent_league_id, counts_for_league, invite_code, rules, start_date, end_date, created_at, deleted_at
             FROM competitions
             WHERE type = 'TORNEO' AND parent_league_id = ?
+              AND (? = 1 OR deleted_at IS NULL)
             ORDER BY id DESC
-          `).all(leagueId)
+          `).all(leagueId, includeTrashed ? 1 : 0)
         : db.prepare(`
-            SELECT id, name, status, admin_id, parent_league_id, counts_for_league, invite_code, rules, start_date, end_date
+            SELECT id, name, status, admin_id, parent_league_id, counts_for_league, invite_code, rules, start_date, end_date, created_at, deleted_at
             FROM competitions
             WHERE type = 'TORNEO'
+              AND (? = 1 OR deleted_at IS NULL)
             ORDER BY id DESC
-          `).all());
+          `).all(includeTrashed ? 1 : 0));
       res.json(rows);
     } catch (e) {
       res.status(500).json({ error: "Failed to list tournaments" });
@@ -911,20 +1002,24 @@ async function startServer() {
   // API: Torneos de una liga
   app.get("/api/leagues/:league_id/tournaments", async (req, res) => {
     const leagueId = Number(req.params.league_id);
+    const includeTrashed = String(req.query.include_trashed || '') === '1';
     try {
       const rows = usePgCore
         ? (await pgQuery(`
             SELECT id, name, status, counts_for_league, invite_code, rules, start_date, end_date
+                 , created_at, deleted_at
             FROM competitions
             WHERE type = 'TORNEO' AND parent_league_id = $1
+              AND ($2::int = 1 OR deleted_at IS NULL)
             ORDER BY id DESC
-          `, [leagueId])).rows
+          `, [leagueId, includeTrashed ? 1 : 0])).rows
         : db.prepare(`
-        SELECT id, name, status, counts_for_league, invite_code, rules, start_date, end_date
+        SELECT id, name, status, counts_for_league, invite_code, rules, start_date, end_date, created_at, deleted_at
         FROM competitions
         WHERE type = 'TORNEO' AND parent_league_id = ?
+          AND (? = 1 OR deleted_at IS NULL)
         ORDER BY id DESC
-      `).all(leagueId);
+      `).all(leagueId, includeTrashed ? 1 : 0);
       res.json(rows);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch league tournaments" });
@@ -939,13 +1034,13 @@ async function startServer() {
     try {
       const existing = usePgCore
         ? (await pgQuery(`
-            SELECT id, name, type, status, counts_for_league, rules, start_date, end_date, invite_code
+            SELECT id, name, type, status, counts_for_league, rules, start_date, end_date, invite_code, parent_league_id, deleted_at
             FROM competitions
             WHERE id = $1
             LIMIT 1
           `, [competitionId])).rows[0] as any
         : db.prepare(`
-            SELECT id, name, type, status, counts_for_league, rules, start_date, end_date, invite_code
+            SELECT id, name, type, status, counts_for_league, rules, start_date, end_date, invite_code, parent_league_id, deleted_at
             FROM competitions
             WHERE id = ?
           `).get(competitionId) as any;
@@ -957,6 +1052,29 @@ async function startServer() {
       const nextStatus = allowedStatus.includes(String(req.body.status || '').toUpperCase())
         ? String(req.body.status).toUpperCase()
         : existing.status;
+
+      const requestedInviteCode = typeof req.body.invite_code === 'string'
+        ? req.body.invite_code.trim().toUpperCase()
+        : '';
+      const nextInviteCode = requestedInviteCode || existing.invite_code;
+
+      if (requestedInviteCode && requestedInviteCode !== existing.invite_code) {
+        const duplicateCode = usePgCore
+          ? (await pgQuery(`
+              SELECT id FROM competitions
+              WHERE invite_code = $1 AND id <> $2
+              LIMIT 1
+            `, [requestedInviteCode, competitionId])).rows[0]
+          : db.prepare(`
+              SELECT id FROM competitions
+              WHERE invite_code = ? AND id <> ?
+              LIMIT 1
+            `).get(requestedInviteCode, competitionId);
+
+        if (duplicateCode) {
+          return res.status(400).json({ error: 'Ese código de invitación ya existe.' });
+        }
+      }
 
       const mergedRules = {
         ...parseRules(existing.rules),
@@ -980,10 +1098,18 @@ async function startServer() {
           : (req.body.counts_for_league ? 1 : 0))
         : 1;
 
+      const nextParentLeagueId = existing.type === 'TORNEO'
+        ? (req.body.parent_league_id === undefined
+          ? (existing.parent_league_id || null)
+          : (req.body.parent_league_id ? Number(req.body.parent_league_id) : null))
+        : null;
+
       const nextPayload = {
         name: rawName || existing.name,
         status: nextStatus,
         counts_for_league: nextCountsForLeague,
+        invite_code: nextInviteCode,
+        parent_league_id: nextParentLeagueId,
         rules: Object.keys(mergedRules).length > 0 ? JSON.stringify(mergedRules) : null,
         start_date: req.body.start_date ?? existing.start_date ?? null,
         end_date: req.body.end_date ?? existing.end_date ?? null,
@@ -995,15 +1121,19 @@ async function startServer() {
           SET name = $1,
               status = $2,
               counts_for_league = $3,
-              rules = $4,
-              start_date = $5,
-              end_date = $6
-          WHERE id = $7
-          RETURNING id, name, type, status, counts_for_league, invite_code, parent_league_id, rules, start_date, end_date
+              invite_code = $4,
+              parent_league_id = $5,
+              rules = $6,
+              start_date = $7,
+              end_date = $8
+          WHERE id = $9
+          RETURNING id, name, type, status, counts_for_league, invite_code, parent_league_id, rules, start_date, end_date, created_at, deleted_at
         `, [
           nextPayload.name,
           nextPayload.status,
           nextPayload.counts_for_league,
+          nextPayload.invite_code,
+          nextPayload.parent_league_id,
           nextPayload.rules,
           nextPayload.start_date,
           nextPayload.end_date,
@@ -1014,12 +1144,14 @@ async function startServer() {
 
       db.prepare(`
         UPDATE competitions
-        SET name = ?, status = ?, counts_for_league = ?, rules = ?, start_date = ?, end_date = ?
+        SET name = ?, status = ?, counts_for_league = ?, invite_code = ?, parent_league_id = ?, rules = ?, start_date = ?, end_date = ?
         WHERE id = ?
       `).run(
         nextPayload.name,
         nextPayload.status,
         nextPayload.counts_for_league,
+        nextPayload.invite_code,
+        nextPayload.parent_league_id,
         nextPayload.rules,
         nextPayload.start_date,
         nextPayload.end_date,
@@ -1027,7 +1159,7 @@ async function startServer() {
       );
 
       const updated = db.prepare(`
-        SELECT id, name, type, status, counts_for_league, invite_code, parent_league_id, rules, start_date, end_date
+        SELECT id, name, type, status, counts_for_league, invite_code, parent_league_id, rules, start_date, end_date, created_at, deleted_at
         FROM competitions
         WHERE id = ?
       `).get(competitionId);
@@ -1035,6 +1167,151 @@ async function startServer() {
     } catch (e) {
       console.error('Error updating competition:', e);
       res.status(500).json({ error: 'Failed to update competition' });
+    }
+  });
+
+  // API: Enviar competencia a papelera
+  app.post('/api/competitions/:id/trash', async (req, res) => {
+    const competitionId = Number(req.params.id);
+    if (!competitionId) return res.status(400).json({ error: 'competition_id inválido' });
+
+    try {
+      if (usePgCore) {
+        const result = await pgQuery(`
+          UPDATE competitions
+          SET deleted_at = CURRENT_TIMESTAMP
+          WHERE id = $1
+          RETURNING id, name, type, deleted_at
+        `, [competitionId]);
+        if (!result.rows[0]) return res.status(404).json({ error: 'Competition not found' });
+        return res.json({ success: true, competition: result.rows[0] });
+      }
+
+      const result = db.prepare(`
+        UPDATE competitions
+        SET deleted_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(competitionId);
+      if (!result.changes) return res.status(404).json({ error: 'Competition not found' });
+      const row = db.prepare('SELECT id, name, type, deleted_at FROM competitions WHERE id = ?').get(competitionId);
+      res.json({ success: true, competition: row });
+    } catch (e) {
+      console.error('Error sending competition to trash:', e);
+      res.status(500).json({ error: 'Failed to move competition to trash' });
+    }
+  });
+
+  // API: Restaurar competencia de papelera
+  app.post('/api/competitions/:id/restore', async (req, res) => {
+    const competitionId = Number(req.params.id);
+    if (!competitionId) return res.status(400).json({ error: 'competition_id inválido' });
+
+    try {
+      if (usePgCore) {
+        const result = await pgQuery(`
+          UPDATE competitions
+          SET deleted_at = NULL
+          WHERE id = $1
+          RETURNING id, name, type, deleted_at
+        `, [competitionId]);
+        if (!result.rows[0]) return res.status(404).json({ error: 'Competition not found' });
+        return res.json({ success: true, competition: result.rows[0] });
+      }
+
+      const result = db.prepare(`
+        UPDATE competitions
+        SET deleted_at = NULL
+        WHERE id = ?
+      `).run(competitionId);
+      if (!result.changes) return res.status(404).json({ error: 'Competition not found' });
+      const row = db.prepare('SELECT id, name, type, deleted_at FROM competitions WHERE id = ?').get(competitionId);
+      res.json({ success: true, competition: row });
+    } catch (e) {
+      console.error('Error restoring competition:', e);
+      res.status(500).json({ error: 'Failed to restore competition' });
+    }
+  });
+
+  // API: Eliminación definitiva desde papelera
+  app.delete('/api/competitions/:id/permanent', async (req, res) => {
+    const competitionId = Number(req.params.id);
+    if (!competitionId) return res.status(400).json({ error: 'competition_id inválido' });
+
+    try {
+      if (usePgCore) {
+        const competitionRes = await pgQuery(`
+          SELECT id, type, deleted_at
+          FROM competitions
+          WHERE id = $1
+          LIMIT 1
+        `, [competitionId]);
+        const competition = competitionRes.rows[0] as any;
+        if (!competition) return res.status(404).json({ error: 'Competition not found' });
+        if (!competition.deleted_at) return res.status(400).json({ error: 'Primero envía la competencia a papelera.' });
+
+        if (competition.type === 'LIGA') {
+          const activeChildren = await pgQuery(`
+            SELECT COUNT(*)::int as c
+            FROM competitions
+            WHERE parent_league_id = $1 AND deleted_at IS NULL
+          `, [competitionId]);
+          if (Number(activeChildren.rows[0]?.c || 0) > 0) {
+            return res.status(400).json({ error: 'La liga tiene torneos activos. Envía esos torneos a papelera primero.' });
+          }
+        }
+
+        await pgQuery('BEGIN');
+        try {
+          await pgQuery(`DELETE FROM stats WHERE match_id IN (SELECT match_id FROM matches WHERE competition_id = $1)`, [competitionId]);
+          await pgQuery(`DELETE FROM matches WHERE competition_id = $1`, [competitionId]);
+          await pgQuery(`DELETE FROM squad_members WHERE squad_id IN (SELECT id FROM squads WHERE competition_id = $1)`, [competitionId]);
+          await pgQuery(`DELETE FROM squads WHERE competition_id = $1`, [competitionId]);
+          await pgQuery(`DELETE FROM tournament_organizers WHERE competition_id = $1`, [competitionId]);
+          await pgQuery(`DELETE FROM competition_members WHERE competition_id = $1`, [competitionId]);
+          await pgQuery(`DELETE FROM competitions WHERE id = $1`, [competitionId]);
+          await pgQuery('COMMIT');
+        } catch (txErr) {
+          await pgQuery('ROLLBACK');
+          throw txErr;
+        }
+
+        return res.json({ success: true });
+      }
+
+      const competition = db.prepare(`
+        SELECT id, type, deleted_at
+        FROM competitions
+        WHERE id = ?
+        LIMIT 1
+      `).get(competitionId) as any;
+      if (!competition) return res.status(404).json({ error: 'Competition not found' });
+      if (!competition.deleted_at) return res.status(400).json({ error: 'Primero envía la competencia a papelera.' });
+
+      if (competition.type === 'LIGA') {
+        const activeChildren = db.prepare(`
+          SELECT COUNT(*) as c
+          FROM competitions
+          WHERE parent_league_id = ? AND deleted_at IS NULL
+        `).get(competitionId) as any;
+        if (Number(activeChildren?.c || 0) > 0) {
+          return res.status(400).json({ error: 'La liga tiene torneos activos. Envía esos torneos a papelera primero.' });
+        }
+      }
+
+      const trx = db.transaction(() => {
+        db.prepare(`DELETE FROM stats WHERE match_id IN (SELECT match_id FROM matches WHERE competition_id = ?)`).run(competitionId);
+        db.prepare(`DELETE FROM matches WHERE competition_id = ?`).run(competitionId);
+        db.prepare(`DELETE FROM squad_members WHERE squad_id IN (SELECT id FROM squads WHERE competition_id = ?)`).run(competitionId);
+        db.prepare(`DELETE FROM squads WHERE competition_id = ?`).run(competitionId);
+        db.prepare(`DELETE FROM tournament_organizers WHERE competition_id = ?`).run(competitionId);
+        db.prepare(`DELETE FROM competition_members WHERE competition_id = ?`).run(competitionId);
+        db.prepare(`DELETE FROM competitions WHERE id = ?`).run(competitionId);
+      });
+      trx();
+      res.json({ success: true });
+    } catch (e) {
+      console.error('Error deleting competition permanently:', e);
+      res.status(500).json({ error: 'Failed to delete competition permanently' });
     }
   });
 
@@ -1047,12 +1324,14 @@ async function startServer() {
             SELECT id, name, type, status, parent_league_id, invite_code
             FROM competitions
             WHERE invite_code = $1
+              AND deleted_at IS NULL
             LIMIT 1
           `, [inviteCode])).rows[0] as any
         : db.prepare(`
         SELECT id, name, type, status, parent_league_id, invite_code
         FROM competitions
         WHERE invite_code = ?
+          AND deleted_at IS NULL
       `).get(inviteCode) as any;
 
       if (!competition) return res.status(404).json({ error: 'Invite code not found' });
@@ -1074,12 +1353,14 @@ async function startServer() {
             SELECT id, name, type, parent_league_id
             FROM competitions
             WHERE invite_code = $1
+              AND deleted_at IS NULL
             LIMIT 1
           `, [inviteCode])).rows[0] as any
         : db.prepare(`
         SELECT id, name, type, parent_league_id
         FROM competitions
         WHERE invite_code = ?
+          AND deleted_at IS NULL
       `).get(inviteCode) as any;
 
       if (!competition) return res.status(404).json({ error: 'Invite code not found' });
@@ -1129,6 +1410,7 @@ async function startServer() {
             FROM competition_members cm
             JOIN competitions c ON c.id = cm.competition_id
             WHERE cm.user_id = $1
+              AND c.deleted_at IS NULL
             ORDER BY cm.joined_at DESC
           `, [userId])).rows
         : db.prepare(`
@@ -1145,6 +1427,7 @@ async function startServer() {
         FROM competition_members cm
         JOIN competitions c ON c.id = cm.competition_id
         WHERE cm.user_id = ?
+          AND c.deleted_at IS NULL
         ORDER BY cm.joined_at DESC
       `).all(userId);
       res.json(rows);
@@ -1819,9 +2102,20 @@ async function startServer() {
   });
 
   // API: Obtener Invitaciones Pendientes
-  app.get("/api/users/:user_id/invitations", (req, res) => {
+  app.get("/api/users/:user_id/invitations", async (req, res) => {
     const { user_id } = req.params;
     try {
+      if (usePgCore) {
+        const invites = await pgQuery(`
+          SELECT s.name as squad_name, s.id as squad_id, u.gamertag as leader_name
+          FROM squad_members sm
+          JOIN squads s ON sm.squad_id = s.id
+          JOIN users u ON s.leader_id = u.google_id
+          WHERE sm.user_id = $1 AND sm.status = 'PENDING'
+        `, [user_id]);
+        return res.json(invites.rows);
+      }
+
       const invites = db.prepare(`
         SELECT s.name as squad_name, s.id as squad_id, u.gamertag as leader_name
         FROM squad_members sm
