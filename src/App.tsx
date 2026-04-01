@@ -567,39 +567,7 @@ export default function App() {
                   ))}
                 </AnimatePresence>
 
-                {playerState === 'idle' && squad ? (
-                  <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-6 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-purple-600/20 flex items-center justify-center text-purple-400">
-                          <Users size={20} />
-                        </div>
-                        <div>
-                          <h2 className="text-lg font-black text-white uppercase tracking-tight">{squad.name}</h2>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Squad actual legacy</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                      {squad.members.map((member: any, i: number) => (
-                        <div key={`${member.id || member.gamertag}-${i}`} className="flex items-center gap-3 p-3 bg-white/5 rounded-2xl border border-white/5">
-                          <div className="w-10 h-10 rounded-xl bg-slate-800 flex-shrink-0 relative overflow-hidden">
-                            {member.avatar_url ? (
-                              <img src={member.avatar_url} className="w-full h-full object-cover" />
-                            ) : (
-                              <div className="w-full h-full bg-gradient-to-br from-slate-700 to-slate-800" />
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-xs font-bold truncate text-slate-200">{member.gamertag}</p>
-                            <p className="text-[10px] text-slate-500">Miembro</p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : playerState === 'idle' && myCompetitions.some((item) => item.type === 'TORNEO') ? (
+                {playerState === 'idle' && myCompetitions.some((item) => item.type === 'TORNEO') ? (
                   <div className="bg-[#0B0E14] border border-white/5 rounded-3xl p-8 flex flex-col items-center text-center space-y-4">
                     <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center text-slate-600">
                       <Users size={32} />

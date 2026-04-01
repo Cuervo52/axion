@@ -1844,30 +1844,20 @@ async function startServer() {
           SELECT s.*, sm.status
           FROM squads s
           JOIN squad_members sm ON s.id = sm.squad_id
-          WHERE sm.user_id = $1 AND sm.status = 'ACTIVE'
+          WHERE sm.user_id = $1
+            AND sm.status = 'ACTIVE'
+            AND s.competition_id IN (
+              SELECT cm.competition_id
+              FROM competition_members cm
+              JOIN competitions c ON c.id = cm.competition_id
+              WHERE cm.user_id = $1
+                AND cm.status = 'ACTIVE'
+                AND c.type = 'TORNEO'
+            )
           ORDER BY
-            CASE
-              WHEN s.competition_id IN (
-                SELECT cm.competition_id
-                FROM competition_members cm
-                JOIN competitions c ON c.id = cm.competition_id
-                WHERE cm.user_id = $2
-                  AND cm.status = 'ACTIVE'
-                  AND c.type = 'TORNEO'
-              ) THEN 0
-              WHEN s.competition_id IN (
-                SELECT cm.competition_id
-                FROM competition_members cm
-                JOIN competitions c ON c.id = cm.competition_id
-                WHERE cm.user_id = $3
-                  AND cm.status = 'ACTIVE'
-                  AND c.type = 'LIGA'
-              ) THEN 1
-              ELSE 2
-            END,
             s.id DESC
           LIMIT 1
-        `, [user_id, user_id, user_id]);
+        `, [user_id]);
 
         const squad = squadRes.rows[0] as any;
         if (!squad) return res.json(null);
@@ -1887,30 +1877,20 @@ async function startServer() {
         SELECT s.*, sm.status
         FROM squads s
         JOIN squad_members sm ON s.id = sm.squad_id
-        WHERE sm.user_id = ? AND sm.status = 'ACTIVE'
+        WHERE sm.user_id = ?
+          AND sm.status = 'ACTIVE'
+          AND s.competition_id IN (
+            SELECT cm.competition_id
+            FROM competition_members cm
+            JOIN competitions c ON c.id = cm.competition_id
+            WHERE cm.user_id = ?
+              AND cm.status = 'ACTIVE'
+              AND c.type = 'TORNEO'
+          )
         ORDER BY
-          CASE
-            WHEN s.competition_id IN (
-              SELECT cm.competition_id
-              FROM competition_members cm
-              JOIN competitions c ON c.id = cm.competition_id
-              WHERE cm.user_id = ?
-                AND cm.status = 'ACTIVE'
-                AND c.type = 'TORNEO'
-            ) THEN 0
-            WHEN s.competition_id IN (
-              SELECT cm.competition_id
-              FROM competition_members cm
-              JOIN competitions c ON c.id = cm.competition_id
-              WHERE cm.user_id = ?
-                AND cm.status = 'ACTIVE'
-                AND c.type = 'LIGA'
-            ) THEN 1
-            ELSE 2
-          END,
           s.id DESC
         LIMIT 1
-      `).get(user_id, user_id, user_id);
+      `).get(user_id, user_id);
 
       if (!squad) return res.json(null);
 
