@@ -1836,9 +1836,53 @@ async function startServer() {
   });
 
   // API: Obtener Squad Actual del Usuario
-  app.get("/api/users/:user_id/squad", (req, res) => {
+  app.get("/api/users/:user_id/squad", async (req, res) => {
     const { user_id } = req.params;
     try {
+      if (usePgCore) {
+        const squadRes = await pgQuery(`
+          SELECT s.*, sm.status
+          FROM squads s
+          JOIN squad_members sm ON s.id = sm.squad_id
+          WHERE sm.user_id = $1 AND sm.status = 'ACTIVE'
+          ORDER BY
+            CASE
+              WHEN s.competition_id IN (
+                SELECT cm.competition_id
+                FROM competition_members cm
+                JOIN competitions c ON c.id = cm.competition_id
+                WHERE cm.user_id = $2
+                  AND cm.status = 'ACTIVE'
+                  AND c.type = 'TORNEO'
+              ) THEN 0
+              WHEN s.competition_id IN (
+                SELECT cm.competition_id
+                FROM competition_members cm
+                JOIN competitions c ON c.id = cm.competition_id
+                WHERE cm.user_id = $3
+                  AND cm.status = 'ACTIVE'
+                  AND c.type = 'LIGA'
+              ) THEN 1
+              ELSE 2
+            END,
+            s.id DESC
+          LIMIT 1
+        `, [user_id, user_id, user_id]);
+
+        const squad = squadRes.rows[0] as any;
+        if (!squad) return res.json(null);
+
+        const membersRes = await pgQuery(`
+          SELECT u.gamertag, u.avatar_url, sm.status, sm.joined_at
+          FROM squad_members sm
+          JOIN users u ON sm.user_id = u.google_id
+          WHERE sm.squad_id = $1
+          ORDER BY sm.status DESC
+        `, [squad.id]);
+
+        return res.json({ ...squad, members: membersRes.rows });
+      }
+
       const squad = db.prepare(`
         SELECT s.*, sm.status
         FROM squads s
