@@ -31,12 +31,6 @@ interface CompetitionMembership {
   member_status: 'ACTIVE' | 'LEFT' | 'BANNED';
 }
 
-interface MockTournamentMember {
-  id: string;
-  gamertag: string;
-  avatar_url: string;
-}
-
 export default function App() {
   const [user, setUser] = useState<UserData | null>(() => {
     const saved = localStorage.getItem('axion_user');
@@ -59,14 +53,12 @@ export default function App() {
   const [isJoiningCompetition, setIsJoiningCompetition] = useState(false);
   const [joinFeedback, setJoinFeedback] = useState<string | null>(null);
   const [handledJoinCode, setHandledJoinCode] = useState<string | null>(null);
-  const [mockTournamentSquad, setMockTournamentSquad] = useState<MockTournamentMember[] | null>(null);
 
   const fallbackCompetitionId = myCompetitions.find((competition) => competition.type === 'TORNEO' && competition.member_status === 'ACTIVE')?.id
     || myCompetitions.find((competition) => competition.type === 'LIGA' && competition.member_status === 'ACTIVE')?.id
     || null;
 
   const activeCompetitionId = squad?.competition_id ? Number(squad.competition_id) : fallbackCompetitionId;
-  const hasMockTournamentSquad = Boolean(mockTournamentSquad?.length);
 
   const fetchMyCompetitions = async (google_id: string) => {
     try {
@@ -275,46 +267,10 @@ export default function App() {
     }
   }, [forceView]);
 
-  useEffect(() => {
-    if (!user) {
-      setMockTournamentSquad(null);
-      return;
-    }
-
-    const syncMockTournamentSquad = () => {
-      try {
-        const raw = localStorage.getItem('axion_mock_tournament_teams');
-        if (!raw) {
-          setMockTournamentSquad(null);
-          return;
-        }
-        const teams = JSON.parse(raw) as MockTournamentMember[][];
-        const team = teams.find((group) =>
-          group.some((member) => member.gamertag.toLowerCase() === user.gamertag.toLowerCase()),
-        ) || null;
-        setMockTournamentSquad(team);
-      } catch {
-        setMockTournamentSquad(null);
-      }
-    };
-
-    syncMockTournamentSquad();
-    window.addEventListener('storage', syncMockTournamentSquad);
-    window.addEventListener('axion-mock-tournament-updated', syncMockTournamentSquad);
-    return () => {
-      window.removeEventListener('storage', syncMockTournamentSquad);
-      window.removeEventListener('axion-mock-tournament-updated', syncMockTournamentSquad);
-    };
-  }, [user]);
-
   const activeTournament = myCompetitions.find((competition) => competition.type === 'TORNEO' && competition.member_status === 'ACTIVE') || null;
   const activeLeague = myCompetitions.find((competition) => competition.type === 'LIGA' && competition.member_status === 'ACTIVE') || null;
   const hasRealTournamentSquad = Boolean(activeTournament && squad && Number(squad.competition_id) === activeTournament.id);
-  const tournamentSquadMembers = hasMockTournamentSquad
-    ? mockTournamentSquad
-    : hasRealTournamentSquad
-      ? (squad?.members || null)
-      : null;
+  const tournamentSquadMembers = hasRealTournamentSquad ? (squad?.members || null) : null;
   const playerState = tournamentSquadMembers
     ? 'tournament_sorted'
     : activeTournament
@@ -520,16 +476,6 @@ export default function App() {
                         className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
                       >
                         <Users size={18} className="text-blue-400" /> Vista player
-                      </button>
-                      <button
-                        onClick={() => {
-                          localStorage.removeItem('axion_mock_tournament_teams');
-                          window.dispatchEvent(new Event('axion-mock-tournament-updated'));
-                          setIsMenuOpen(false);
-                        }}
-                        className="w-full flex items-center gap-3 px-3 py-2 text-slate-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
-                      >
-                        <X size={18} className="text-slate-500" /> Limpiar sorteo
                       </button>
                     </div>
                   </div>

@@ -1561,10 +1561,131 @@ async function startServer() {
     }
   });
 
-  app.get("/api/player/dashboard/:user_id", (req, res) => {
+  app.get("/api/player/dashboard/:user_id", async (req, res) => {
     const userId = req.params.user_id;
 
     try {
+      if (usePgCore) {
+        const competitions = (await pgQuery(`
+          SELECT
+            c.id,
+            c.name,
+            c.type,
+            c.status,
+            c.parent_league_id,
+            c.invite_code,
+            cm.role,
+            cm.status as member_status,
+            cm.joined_at
+          FROM competition_members cm
+          JOIN competitions c ON c.id = cm.competition_id
+          WHERE cm.user_id = $1 AND cm.status = 'ACTIVE'
+          ORDER BY CASE WHEN c.type = 'TORNEO' THEN 0 ELSE 1 END, cm.joined_at DESC
+        `, [userId])).rows as any[];
+
+        const activeTournament = competitions.find((competition) => competition.type === 'TORNEO') || null;
+        const activeLeague = competitions.find((competition) => competition.type === 'LIGA') || null;
+
+        const summaryRow = (await pgQuery(`
+          SELECT
+            COALESCE(SUM(s.score), 0) as score,
+            COALESCE(SUM(s.eliminations), 0) as eliminations,
+            COALESCE(SUM(s.kills), 0) as kills,
+            COALESCE(SUM(s.assists), 0) as assists,
+            COALESCE(SUM(s.redeploys), 0) as redeploys,
+            COALESCE(SUM(s.damage), 0) as damage,
+            COUNT(DISTINCT s.match_id) as matches
+          FROM stats s
+          JOIN matches m ON m.match_id = s.match_id
+          WHERE s.user_id = $1
+        `, [userId])).rows[0] as any;
+
+        const recentMatches = (await pgQuery(`
+          SELECT
+            m.match_id,
+            m.processed_at as date,
+            COALESCE(m.mode, 'N/A') as mode,
+            COALESCE(m.position, 'N/A') as position,
+            COALESCE(c.name, 'Sin competencia') as competition_name,
+            COALESCE(c.type, 'N/A') as competition_type,
+            COALESCE(s.kills, 0) as kills,
+            COALESCE(s.score, 0) as points,
+            COALESCE(s.damage, 0) as damage,
+            COALESCE(s.assists, 0) as assists
+          FROM stats s
+          JOIN matches m ON m.match_id = s.match_id
+          LEFT JOIN competitions c ON c.id = m.competition_id
+          WHERE s.user_id = $1
+          ORDER BY m.processed_at DESC
+          LIMIT 20
+        `, [userId])).rows;
+
+        const leagueRows = competitions.filter((competition) => competition.type === 'LIGA');
+        const leagues = await Promise.all(leagueRows.map(async (leagueCompetition) => {
+          const progressRow = (await pgQuery(`
+            SELECT
+              COALESCE(SUM(s.score), 0) as score,
+              COALESCE(SUM(s.eliminations), 0) as eliminations,
+              COALESCE(SUM(s.kills), 0) as kills,
+              COALESCE(SUM(s.assists), 0) as assists,
+              COALESCE(SUM(s.redeploys), 0) as redeploys,
+              COALESCE(SUM(s.damage), 0) as damage,
+              COUNT(DISTINCT s.match_id) as matches
+            FROM stats s
+            JOIN matches m ON m.match_id = s.match_id
+            WHERE s.user_id = $1
+              AND (
+                m.competition_id = $2
+                OR m.competition_id IN (
+                  SELECT id FROM competitions
+                  WHERE type = 'TORNEO' AND parent_league_id = $2 AND counts_for_league = 1
+                )
+              )
+          `, [userId, Number(leagueCompetition.id)])).rows[0] as any;
+
+          const currentTournament = (await pgQuery(`
+            SELECT id, name, status, parent_league_id, start_date, end_date, counts_for_league
+            FROM competitions
+            WHERE type = 'TORNEO' AND parent_league_id = $1
+            ORDER BY CASE WHEN status IN ('ACTIVE','OPEN') THEN 0 ELSE 1 END, id DESC
+            LIMIT 1
+          `, [Number(leagueCompetition.id)])).rows[0] || null;
+
+          const pastTournaments = (await pgQuery(`
+            SELECT id, name, status, parent_league_id, start_date, end_date, counts_for_league
+            FROM competitions
+            WHERE type = 'TORNEO' AND parent_league_id = $1
+            ORDER BY id DESC
+            LIMIT 10
+          `, [Number(leagueCompetition.id)])).rows.map((competition) => ({ competition }));
+
+          return {
+            competition: leagueCompetition,
+            my_progress: progressRow,
+            current_tournament: currentTournament ? { competition: currentTournament, my_squad: null, my_team_summary: null, standings: { teams: [], players: [] }, recent_matches: [] } : null,
+            past_tournaments: pastTournaments,
+            standings: { players: [] },
+          };
+        }));
+
+        return res.json({
+          tabs: [
+            { id: 'career', label: 'Carrera', type: 'CAREER' },
+            { id: 'league', label: 'Ligas', type: 'LIGA' },
+          ],
+          competitions,
+          active_tournament: activeTournament,
+          active_league: activeLeague,
+          tournament: null,
+          leagues,
+          career: {
+            summary: summaryRow || { score: 0, eliminations: 0, kills: 0, assists: 0, redeploys: 0, damage: 0, matches: 0 },
+            recent_matches: recentMatches,
+          },
+          supported_stats: ['score', 'eliminations', 'kills', 'assists', 'redeploys', 'damage', 'matches'],
+        });
+      }
+
       const { competitions, activeTournament, activeLeague } = getCompetitionContext(userId);
       const personalOverall = getProgressStats(userId) as any;
       const tournamentSnapshot = activeTournament ? buildTournamentSnapshot(activeTournament.id, userId) : null;
