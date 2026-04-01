@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
+import path from "node:path";
 import { handleWhatsAppMessage } from "./src/server/whatsapp";
 import db from "./src/server/db";
 import { initPgSchema, isPgCoreEnabled, pgQuery } from "./src/server/pg";
@@ -2191,6 +2192,11 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static("dist"));
+
+    // Fallback SPA: cualquier ruta no API regresa el index del frontend.
+    app.get(/^\/(?!api\/).*/, (_req, res) => {
+      res.sendFile(path.resolve("dist", "index.html"));
+    });
   }
 
   // Middleware de manejo de errores para payload size (MOVIDO AL FINAL)
